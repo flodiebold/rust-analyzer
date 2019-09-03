@@ -158,6 +158,9 @@ pub(crate) fn trait_solve_query(
 ) -> Option<Solution> {
     let _p = profile("trait_solve_query");
     debug!("trait_solve_query({})", goal.value.value.display(db));
+    if chalk::chalk_reproduce_mode() {
+        println!("// GOAL: {}", goal.value.value.display(db));
+    }
     let canonical = goal.to_chalk(db).cast();
     // We currently don't deal with universes (I think / hope they're not yet
     // relevant for our use cases?)

@@ -24,6 +24,10 @@ use crate::{
     Crate, HasGenericParams, ImplBlock, ImplItem, Trait, TypeAlias,
 };
 
+mod reproduce;
+
+pub(super) use self::reproduce::chalk_reproduce_mode;
+
 /// This represents a trait whose name we could not resolve.
 const UNKNOWN_TRAIT: chalk_ir::TraitId =
     chalk_ir::TraitId(chalk_ir::RawId { index: u32::max_value() });
@@ -496,6 +500,9 @@ pub(crate) fn trait_datum_query(
     }
     let trait_: Trait = from_chalk(db, trait_id);
     debug!("trait {:?} = {:?}", trait_id, trait_.name(db));
+    if chalk_reproduce_mode() {
+        reproduce::reproduce_trait(db, krate, trait_);
+    }
     let generic_params = trait_.generic_params(db);
     let bound_vars = Substs::bound_vars(&generic_params);
     let trait_ref = trait_.trait_ref(db).subst(&bound_vars).to_chalk(db);
@@ -530,6 +537,9 @@ pub(crate) fn struct_datum_query(
 ) -> Arc<StructDatum> {
     debug!("struct_datum {:?}", struct_id);
     let type_ctor = from_chalk(db, struct_id);
+    if chalk_reproduce_mode() {
+        reproduce::reproduce_struct(db, type_ctor);
+    }
     debug!("struct {:?} = {:?}", struct_id, type_ctor);
     // FIXME might be nicer if we can create a fake GenericParams for the TypeCtor
     // FIXME extract this to a method on Ty
@@ -606,6 +616,9 @@ pub(crate) fn impl_datum_query(
     let _p = ra_prof::profile("impl_datum");
     debug!("impl_datum {:?}", impl_id);
     let impl_block: ImplBlock = from_chalk(db, impl_id);
+    if chalk_reproduce_mode() {
+        reproduce::reproduce_impl(db, impl_block);
+    }
     let generic_params = impl_block.generic_params(db);
     let bound_vars = Substs::bound_vars(&generic_params);
     let trait_ref = impl_block
