@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 
 use log::debug;
 
-use chalk_ir::{cast::Cast, Parameter, PlaceholderIndex, TypeName, UniverseIndex};
+use chalk_ir::{cast::Cast, GoalData, Parameter, PlaceholderIndex, TypeName, UniverseIndex};
 
 use hir_def::{AssocContainerId, AssocItemId, GenericDefId, HasModule, Lookup, TypeAliasId};
 use ra_db::{
@@ -24,6 +24,8 @@ impl chalk_ir::family::TypeFamily for TypeFamily {
     type InternedType = Box<chalk_ir::TyData<Self>>;
     type InternedLifetime = chalk_ir::LifetimeData<Self>;
     type InternedParameter = chalk_ir::ParameterData<Self>;
+    type InternedGoal = Arc<GoalData<Self>>;
+    type InternedSubstitution = Vec<Parameter<Self>>;
     type DefId = InternId;
 
     // FIXME: implement these
@@ -78,6 +80,24 @@ impl chalk_ir::family::TypeFamily for TypeFamily {
     fn parameter_data(parameter: &chalk_ir::ParameterData<Self>) -> &chalk_ir::ParameterData<Self> {
         parameter
     }
+
+    fn intern_goal(goal: GoalData<Self>) -> Arc<GoalData<Self>> {
+        Arc::new(goal)
+    }
+
+    fn goal_data(goal: &Arc<GoalData<Self>>) -> &GoalData<Self> {
+        goal
+    }
+
+    fn intern_substitution<E>(
+        data: impl IntoIterator<Item = Result<Parameter<Self>, E>>,
+    ) -> Result<Vec<Parameter<Self>>, E> {
+        data.into_iter().collect()
+    }
+
+    fn substitution_data(substitution: &Vec<Parameter<Self>>) -> &[Parameter<Self>] {
+        substitution
+    }
 }
 
 impl chalk_ir::family::HasTypeFamily for TypeFamily {
@@ -114,13 +134,13 @@ impl ToChalk for Ty {
         match self {
             Ty::Apply(apply_ty) => {
                 let name = apply_ty.ctor.to_chalk(db);
-                let parameters = apply_ty.parameters.to_chalk(db);
-                chalk_ir::ApplicationTy { name, parameters }.cast().intern()
+                let substitution = apply_ty.parameters.to_chalk(db);
+                chalk_ir::ApplicationTy { name, substitution }.cast().intern()
             }
             Ty::Projection(proj_ty) => {
                 let associated_ty_id = proj_ty.associated_ty.to_chalk(db);
-                let parameters = proj_ty.parameters.to_chalk(db);
-                chalk_ir::ProjectionTy { associated_ty_id, parameters }.cast().intern()
+                let substitution = proj_ty.parameters.to_chalk(db);
+                chalk_ir::ProjectionTy { associated_ty_id, substitution }.cast().intern()
             }
             Ty::Param { idx, .. } => {
                 PlaceholderIndex { ui: UniverseIndex::ROOT, idx: idx as usize }
@@ -135,23 +155,14 @@ impl ToChalk for Ty {
                     .cloned()
                     .map(|p| p.to_chalk(db))
                     .collect();
-                let bounded_ty = chalk_ir::BoundedTy { bounds: make_binders(where_clauses, 1) };
+                let bounded_ty = chalk_ir::DynTy { bounds: make_binders(where_clauses, 1) };
                 chalk_ir::TyData::Dyn(bounded_ty).intern()
             }
-            Ty::Opaque(predicates) => {
-                let where_clauses = predicates
-                    .iter()
-                    .filter(|p| !p.is_error())
-                    .cloned()
-                    .map(|p| p.to_chalk(db))
-                    .collect();
-                let bounded_ty = chalk_ir::BoundedTy { bounds: make_binders(where_clauses, 1) };
-                chalk_ir::TyData::Opaque(bounded_ty).intern()
-            }
+            Ty::Opaque(_predicates) => unimplemented!(),
             Ty::Unknown => {
-                let parameters = Vec::new();
+                let substitution = chalk_ir::Substitution::empty();
                 let name = TypeName::Error;
-                chalk_ir::ApplicationTy { name, parameters }.cast().intern()
+                chalk_ir::ApplicationTy { name, substitution }.cast().intern()
             }
         }
     }
@@ -161,7 +172,7 @@ impl ToChalk for Ty {
                 TypeName::Error => Ty::Unknown,
                 _ => {
                     let ctor = from_chalk(db, apply_ty.name);
-                    let parameters = from_chalk(db, apply_ty.parameters);
+                    let parameters = from_chalk(db, apply_ty.substitution);
                     Ty::Apply(ApplicationTy { ctor, parameters })
                 }
             },
@@ -171,10 +182,10 @@ impl ToChalk for Ty {
             }
             chalk_ir::TyData::Projection(proj) => {
                 let associated_ty = from_chalk(db, proj.associated_ty_id);
-                let parameters = from_chalk(db, proj.parameters);
+                let parameters = from_chalk(db, proj.substitution);
                 Ty::Projection(ProjectionTy { associated_ty, parameters })
             }
-            chalk_ir::TyData::ForAll(_) => unimplemented!(),
+            chalk_ir::TyData::Function(_) => unimplemented!(),
             chalk_ir::TyData::BoundVar(idx) => Ty::Bound(idx as u32),
             chalk_ir::TyData::InferenceVar(_iv) => Ty::Unknown,
             chalk_ir::TyData::Dyn(where_clauses) => {
@@ -183,27 +194,18 @@ impl ToChalk for Ty {
                     where_clauses.bounds.value.into_iter().map(|c| from_chalk(db, c)).collect();
                 Ty::Dyn(predicates)
             }
-            chalk_ir::TyData::Opaque(where_clauses) => {
-                assert_eq!(where_clauses.bounds.binders.len(), 1);
-                let predicates =
-                    where_clauses.bounds.value.into_iter().map(|c| from_chalk(db, c)).collect();
-                Ty::Opaque(predicates)
-            }
         }
     }
 }
 
 impl ToChalk for Substs {
-    type Chalk = Vec<chalk_ir::Parameter<TypeFamily>>;
+    type Chalk = chalk_ir::Substitution<TypeFamily>;
 
-    fn to_chalk(self, db: &impl HirDatabase) -> Vec<Parameter<TypeFamily>> {
-        self.iter().map(|ty| ty.clone().to_chalk(db).cast()).collect()
+    fn to_chalk(self, db: &impl HirDatabase) -> chalk_ir::Substitution<TypeFamily> {
+        chalk_ir::Substitution::from(self.iter().map(|ty| ty.clone().to_chalk(db)))
     }
 
-    fn from_chalk(
-        db: &impl HirDatabase,
-        parameters: Vec<chalk_ir::Parameter<TypeFamily>>,
-    ) -> Substs {
+    fn from_chalk(db: &impl HirDatabase, parameters: chalk_ir::Substitution<TypeFamily>) -> Substs {
         let tys = parameters
             .into_iter()
             .map(|p| match p.ty() {
@@ -220,13 +222,13 @@ impl ToChalk for TraitRef {
 
     fn to_chalk(self: TraitRef, db: &impl HirDatabase) -> chalk_ir::TraitRef<TypeFamily> {
         let trait_id = self.trait_.to_chalk(db);
-        let parameters = self.substs.to_chalk(db);
-        chalk_ir::TraitRef { trait_id, parameters }
+        let substitution = self.substs.to_chalk(db);
+        chalk_ir::TraitRef { trait_id, substitution }
     }
 
     fn from_chalk(db: &impl HirDatabase, trait_ref: chalk_ir::TraitRef<TypeFamily>) -> Self {
         let trait_ = from_chalk(db, trait_ref.trait_id);
-        let substs = from_chalk(db, trait_ref.parameters);
+        let substs = from_chalk(db, trait_ref.substitution);
         TraitRef { trait_, substs }
     }
 }
@@ -350,7 +352,7 @@ impl ToChalk for ProjectionTy {
     fn to_chalk(self, db: &impl HirDatabase) -> chalk_ir::ProjectionTy<TypeFamily> {
         chalk_ir::ProjectionTy {
             associated_ty_id: self.associated_ty.to_chalk(db),
-            parameters: self.parameters.to_chalk(db),
+            substitution: self.parameters.to_chalk(db),
         }
     }
 
@@ -360,7 +362,7 @@ impl ToChalk for ProjectionTy {
     ) -> ProjectionTy {
         ProjectionTy {
             associated_ty: from_chalk(db, projection_ty.associated_ty_id),
-            parameters: from_chalk(db, projection_ty.parameters),
+            parameters: from_chalk(db, projection_ty.substitution),
         }
     }
 }
