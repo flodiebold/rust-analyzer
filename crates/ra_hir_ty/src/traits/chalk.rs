@@ -50,8 +50,15 @@ impl chalk_ir::family::TypeFamily for TypeFamily {
         None
     }
 
-    fn debug_projection(
-        _projection: &chalk_ir::ProjectionTy<Self>,
+    fn debug_impl_trait_id(
+        _impl_trait_id: chalk_ir::ImplTraitId<Self>,
+        _fmt: &mut fmt::Formatter<'_>,
+    ) -> Option<fmt::Result> {
+        None
+    }
+
+    fn debug_alias(
+        _alias: &chalk_ir::AliasTy<Self>,
         _fmt: &mut fmt::Formatter<'_>,
     ) -> Option<fmt::Result> {
         None
@@ -140,7 +147,12 @@ impl ToChalk for Ty {
             Ty::Projection(proj_ty) => {
                 let associated_ty_id = proj_ty.associated_ty.to_chalk(db);
                 let substitution = proj_ty.parameters.to_chalk(db);
-                chalk_ir::ProjectionTy { associated_ty_id, substitution }.cast().intern()
+                chalk_ir::AliasTy::Projection(chalk_ir::ProjectionTy {
+                    associated_ty_id,
+                    substitution,
+                })
+                .cast()
+                .intern()
             }
             Ty::Param { idx, .. } => {
                 PlaceholderIndex { ui: UniverseIndex::ROOT, idx: idx as usize }
@@ -180,11 +192,12 @@ impl ToChalk for Ty {
                 assert_eq!(idx.ui, UniverseIndex::ROOT);
                 Ty::Param { idx: idx.idx as u32, name: crate::Name::missing() }
             }
-            chalk_ir::TyData::Projection(proj) => {
+            chalk_ir::TyData::Alias(chalk_ir::AliasTy::Projection(proj)) => {
                 let associated_ty = from_chalk(db, proj.associated_ty_id);
                 let parameters = from_chalk(db, proj.substitution);
                 Ty::Projection(ProjectionTy { associated_ty, parameters })
             }
+            chalk_ir::TyData::Alias(chalk_ir::AliasTy::ImplTrait(_)) => unimplemented!(),
             chalk_ir::TyData::Function(_) => unimplemented!(),
             chalk_ir::TyData::BoundVar(idx) => Ty::Bound(idx as u32),
             chalk_ir::TyData::InferenceVar(_iv) => Ty::Unknown,
@@ -266,6 +279,9 @@ impl ToChalk for TypeCtor {
         match type_name {
             TypeName::Struct(struct_id) => db.lookup_intern_type_ctor(struct_id.into()),
             TypeName::AssociatedType(type_id) => TypeCtor::AssociatedType(from_chalk(db, type_id)),
+            TypeName::ImplTrait(_) => {
+                unimplemented!()
+            }
             TypeName::Error => {
                 // this should not be reached, since we don't represent TypeName::Error with TypeCtor
                 unreachable!()
@@ -372,7 +388,7 @@ impl ToChalk for super::ProjectionPredicate {
 
     fn to_chalk(self, db: &impl HirDatabase) -> chalk_ir::Normalize<TypeFamily> {
         chalk_ir::Normalize {
-            projection: self.projection_ty.to_chalk(db),
+            alias: chalk_ir::AliasTy::Projection(self.projection_ty.to_chalk(db)),
             ty: self.ty.to_chalk(db),
         }
     }
@@ -597,6 +613,15 @@ where
             TypeName::Struct(struct_id) => Some(*struct_id),
             _ => None,
         }
+    }
+    fn impl_trait_datum(
+        &self,
+        _id: chalk_ir::ImplTraitId<TypeFamily>,
+    ) -> Arc<chalk_rust_ir::ImplTraitDatum<TypeFamily>> {
+        unimplemented!()
+    }
+    fn auto_traits(&self) -> Vec<chalk_ir::TraitId<TypeFamily>> {
+        vec![]
     }
 }
 
