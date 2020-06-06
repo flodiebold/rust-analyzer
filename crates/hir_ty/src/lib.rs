@@ -17,6 +17,7 @@ pub(crate) mod utils;
 pub mod display;
 pub mod db;
 pub mod diagnostics;
+pub mod hir;
 
 #[cfg(test)]
 mod tests;
