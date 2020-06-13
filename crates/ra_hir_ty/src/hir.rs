@@ -1,8 +1,17 @@
-use std::sync::Arc;
+#![allow(unused)]
 
-use hir_def::{type_ref::Mutability, AdtId, TypeAliasId, TypeParamId, TraitId};
+use std::{iter::FromIterator, sync::Arc};
 
-use crate::{primitive::{FloatTy, IntTy}, OpaqueTyId};
+use hir_def::{
+    db::DefDatabase, type_ref::Mutability, AdtId, GenericDefId, TraitId, TypeAliasId, TypeParamId,
+};
+
+use crate::{
+    primitive::{FloatTy, IntTy},
+    OpaqueTyId,
+};
+
+mod lower;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum TypeName {
@@ -46,7 +55,7 @@ pub enum TypeName {
     /// fn foo() -> i32 { 1 }
     /// let bar: fn() -> i32 = foo;
     /// ```
-    FnPtr { num_args: u16 },
+    FnPtr { num_args: u16, is_varargs: bool },
 
     /// The never type `!`.
     Never,
@@ -84,13 +93,6 @@ pub enum Type {
     /// situation, we know this stands for *some* type, but don't know the exact
     /// type.
     Placeholder(TypeParamId),
-
-    /// A bound type variable. This is used in various places: when representing
-    /// some polymorphic type like the type of function `fn f<T>`, the type
-    /// parameters get turned into variables; during trait resolution, inference
-    /// variables get turned into bound variables and back; and in `Dyn` the
-    /// `Self` type is represented with a bound variable as well.
-    // Bound(BoundVar), // TODO maybe not necessary
 
     /// A trait object (`dyn Trait` or bare `Trait` in pre-2018 Rust).
     Dyn(Arc<[Bound]>),
@@ -159,3 +161,64 @@ pub struct AssocTypeBinding {
     pub arguments: TypeArgs,
     pub ty: Type,
 }
+
+impl Type {
+    pub fn simple(name: TypeName) -> Self {
+        Type::Apply(ApplicationType { name, arguments: TypeArgs::empty() })
+    }
+    pub fn apply_one(name: TypeName, arg: Type) -> Self {
+        Type::Apply(ApplicationType { name, arguments: TypeArgs::single(arg) })
+    }
+    pub fn apply(name: TypeName, arguments: TypeArgs) -> Self {
+        Type::Apply(ApplicationType { name, arguments })
+    }
+    pub fn unit() -> Self {
+        Type::apply(TypeName::Tuple { cardinality: 0 }, TypeArgs::empty())
+    }
+}
+
+impl TypeArgs {
+    pub fn empty() -> Self {
+        Self(Arc::new([]))
+    }
+
+    pub fn single(ty: Type) -> Self {
+        Self(Arc::new([ty]))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn type_params_for_generics(generics: &crate::Generics) -> Self {
+        generics.iter().map(|(id, _)| Type::Placeholder(id)).collect()
+    }
+
+    pub fn type_params(db: &dyn DefDatabase, def: GenericDefId) -> Self {
+        let generics = crate::generics(db, def);
+        Self::type_params_for_generics(&generics)
+    }
+}
+
+impl FromIterator<Type> for TypeArgs {
+    fn from_iter<T: IntoIterator<Item = Type>>(iter: T) -> Self {
+        TypeArgs(iter.into_iter().collect())
+    }
+}
+
+pub(crate) trait HirTypeWalk {}
+
+impl HirTypeWalk for Type {}
+impl HirTypeWalk for TypeArgs {}
+impl HirTypeWalk for Bound {}
+impl HirTypeWalk for TraitBound {}
+
+pub(crate) fn substitute<T: HirTypeWalk>(generics: &crate::Generics, t: T, args: TypeArgs) -> T {
+    todo!()
+}
+
+pub(crate) use lower::{
+    generic_bounds_for_param_query, generic_bounds_for_param_recover, generic_defaults_query,
+    impl_self_ty_query, impl_self_ty_recover, impl_trait_query, type_alias_type_query,
+    type_alias_type_recover,
+};

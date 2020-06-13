@@ -5,11 +5,12 @@ use std::sync::Arc;
 use base_db::{impl_intern_key, salsa, CrateId, Upcast};
 use hir_def::{
     db::DefDatabase, expr::ExprId, ConstParamId, DefWithBodyId, FunctionId, GenericDefId, ImplId,
-    LocalFieldId, TypeParamId, VariantId,
+    TypeAliasId, LocalFieldId, TypeParamId, VariantId,
 };
 use la_arena::ArenaMap;
 
 use crate::{
+    hir::{Bound, TraitBound, Type},
     method_resolution::{InherentImpls, TraitImpls},
     traits::chalk,
     Binders, CallableDefId, GenericPredicate, InferenceResult, OpaqueTyId, PolyFnSig,
@@ -30,6 +31,10 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::cycle(crate::lower::ty_recover)]
     fn ty(&self, def: TyDefId) -> Binders<Ty>;
 
+    #[salsa::invoke(crate::hir::type_alias_type_query)]
+    #[salsa::cycle(crate::hir::type_alias_type_recover)]
+    fn type_alias_type(&self, def: TypeAliasId) -> Type;
+
     #[salsa::invoke(crate::lower::value_ty_query)]
     fn value_ty(&self, def: ValueTyDefId) -> Binders<Ty>;
 
@@ -37,11 +42,18 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::cycle(crate::lower::impl_self_ty_recover)]
     fn impl_self_ty(&self, def: ImplId) -> Binders<Ty>;
 
+    #[salsa::invoke(crate::hir::impl_self_ty_query)]
+    #[salsa::cycle(crate::hir::impl_self_ty_recover)]
+    fn impl_self_ty_2(&self, def: ImplId) -> Type;
+
     #[salsa::invoke(crate::lower::const_param_ty_query)]
     fn const_param_ty(&self, def: ConstParamId) -> Ty;
 
     #[salsa::invoke(crate::lower::impl_trait_query)]
     fn impl_trait(&self, def: ImplId) -> Option<Binders<TraitRef>>;
+
+    #[salsa::invoke(crate::hir::impl_trait_query)]
+    fn impl_trait_2(&self, def: ImplId) -> Option<TraitBound>;
 
     #[salsa::invoke(crate::lower::field_types_query)]
     fn field_types(&self, var: VariantId) -> Arc<ArenaMap<LocalFieldId, Binders<Ty>>>;
@@ -62,11 +74,18 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
         param_id: TypeParamId,
     ) -> Arc<[Binders<GenericPredicate>]>;
 
+    #[salsa::invoke(crate::hir::generic_bounds_for_param_query)]
+    #[salsa::cycle(crate::hir::generic_bounds_for_param_recover)]
+    fn generic_bounds_for_param(&self, param_id: TypeParamId) -> Arc<[Bound]>;
+
     #[salsa::invoke(crate::lower::generic_predicates_query)]
     fn generic_predicates(&self, def: GenericDefId) -> Arc<[Binders<GenericPredicate>]>;
 
     #[salsa::invoke(crate::lower::generic_defaults_query)]
     fn generic_defaults(&self, def: GenericDefId) -> Arc<[Binders<Ty>]>;
+
+    #[salsa::invoke(crate::hir::generic_defaults_query)]
+    fn generic_defaults_2(&self, def: GenericDefId) -> Arc<[Type]>;
 
     #[salsa::invoke(InherentImpls::inherent_impls_in_crate_query)]
     fn inherent_impls_in_crate(&self, krate: CrateId) -> Arc<InherentImpls>;
