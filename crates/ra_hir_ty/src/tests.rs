@@ -37,6 +37,16 @@ use crate::{
 // against snapshots of the expected results using insta. Use cargo-insta to
 // update the snapshots.
 
+fn with_tracing_logs<T>(action: impl FnOnce() -> T) -> T {
+    use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
+    use tracing_tree::HierarchicalLayer;
+    let filter = EnvFilter::from_env("CHALK_DEBUG");
+    let subscriber = Registry::default()
+        .with(filter)
+        .with(HierarchicalLayer::new(2));
+    tracing::subscriber::with_default(subscriber, action)
+}
+
 fn check_types(ra_fixture: &str) {
     check_types_impl(ra_fixture, false)
 }
@@ -46,22 +56,24 @@ fn check_types_source_code(ra_fixture: &str) {
 }
 
 fn check_types_impl(ra_fixture: &str, display_source: bool) {
-    let db = TestDB::with_files(ra_fixture);
-    let mut checked_one = false;
-    for (file_id, annotations) in db.extract_annotations() {
-        for (range, expected) in annotations {
-            let ty = type_at_range(&db, FileRange { file_id, range });
-            let actual = if display_source {
-                let module = db.module_for_file(file_id);
-                ty.display_source_code(&db, module).unwrap()
-            } else {
-                ty.display(&db).to_string()
-            };
-            assert_eq!(expected, actual);
-            checked_one = true;
+    with_tracing_logs(|| {
+        let db = TestDB::with_files(ra_fixture);
+        let mut checked_one = false;
+        for (file_id, annotations) in db.extract_annotations() {
+            for (range, expected) in annotations {
+                let ty = type_at_range(&db, FileRange { file_id, range });
+                let actual = if display_source {
+                    let module = db.module_for_file(file_id);
+                    ty.display_source_code(&db, module).unwrap()
+                } else {
+                    ty.display(&db).to_string()
+                };
+                assert_eq!(expected, actual);
+                checked_one = true;
+            }
         }
-    }
-    assert!(checked_one, "no `//^` annotations found");
+        assert!(checked_one, "no `//^` annotations found");
+    });
 }
 
 fn type_at_range(db: &TestDB, pos: FileRange) -> Ty {
@@ -190,7 +202,7 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
     });
     for def in defs {
         let (_body, source_map) = db.body_with_source_map(def);
-        let infer = db.infer(def);
+        let infer = with_tracing_logs(|| db.infer(def));
         infer_def(infer, source_map);
     }
 
