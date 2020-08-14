@@ -201,10 +201,10 @@ impl TypeArgs {
     }
 }
 
-impl std::ops::Index<usize> for TypeArgs {
-    type Output = Type;
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.0[index]
+impl std::ops::Deref for TypeArgs {
+    type Target = [Type];
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

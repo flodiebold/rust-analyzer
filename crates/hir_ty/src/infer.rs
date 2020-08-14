@@ -60,6 +60,7 @@ mod path;
 mod expr;
 mod pat;
 mod coerce;
+mod instantiate;
 
 /// The entry point of type inference.
 pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<InferenceResult> {
@@ -294,10 +295,9 @@ impl<'a> InferenceContext<'a> {
         impl_trait_mode: ImplTraitLoweringMode,
     ) -> Ty {
         // FIXME use right resolver for block
-        let ctx = crate::lower::TyLoweringContext::new(self.db, &self.resolver)
-            .with_impl_trait_mode(impl_trait_mode);
-        let ty = Ty::from_hir(&ctx, type_ref);
-        let ty = self.insert_type_vars(ty);
+        let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
+        let typ = ctx.lower_type(type_ref);
+        let ty = self.instantiate_type(&typ);
         self.normalize_associated_types_in(ty)
     }
 
