@@ -93,6 +93,7 @@ pub enum Type {
     /// {}` when we're type-checking the body of that function. In this
     /// situation, we know this stands for *some* type, but don't know the exact
     /// type.
+    // FIXME rename to Param
     Placeholder(TypeParamId),
 
     /// A trait object (`dyn Trait` or bare `Trait` in pre-2018 Rust).
