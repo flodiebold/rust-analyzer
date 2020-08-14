@@ -8,6 +8,7 @@ use hir_def::{
 
 use crate::{
     primitive::{FloatTy, IntTy},
+    utils::make_mut_slice,
     OpaqueTyId,
 };
 
@@ -200,21 +201,139 @@ impl TypeArgs {
     }
 }
 
+impl std::ops::Index<usize> for TypeArgs {
+    type Output = Type;
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.0[index]
+    }
+}
+
 impl FromIterator<Type> for TypeArgs {
     fn from_iter<T: IntoIterator<Item = Type>>(iter: T) -> Self {
         TypeArgs(iter.into_iter().collect())
     }
 }
 
-pub(crate) trait HirTypeWalk {}
+pub(crate) trait HirTypeWalk {
+    fn walk(&self, f: &mut impl FnMut(&Type));
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type));
+}
 
-impl HirTypeWalk for Type {}
-impl HirTypeWalk for TypeArgs {}
-impl HirTypeWalk for Bound {}
-impl HirTypeWalk for TraitBound {}
+impl HirTypeWalk for Type {
+    fn walk(&self, f: &mut impl FnMut(&Type)) {
+        match self {
+            Type::Apply(a_ty) => {
+                a_ty.arguments.walk(f);
+            }
+            Type::Projection(p_ty) => {
+                p_ty.arguments.walk(f);
+            }
+            Type::Opaque(o_ty) => {
+                o_ty.arguments.walk(f);
+            }
+            Type::Dyn(bounds) => {
+                for bound in bounds.iter() {
+                    bound.walk(f);
+                }
+            }
+            Type::Placeholder(_) => {}
+            Type::Infer => {}
+            Type::Error => {}
+        }
+        f(self);
+    }
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        match self {
+            Type::Apply(a_ty) => {
+                a_ty.arguments.walk_mut(f);
+            }
+            Type::Projection(p_ty) => {
+                p_ty.arguments.walk_mut(f);
+            }
+            Type::Opaque(o_ty) => {
+                o_ty.arguments.walk_mut(f);
+            }
+            Type::Dyn(bounds) => {
+                for bound in make_mut_slice(bounds) {
+                    bound.walk_mut(f);
+                }
+            }
+            Type::Placeholder(_) => {}
+            Type::Infer => {}
+            Type::Error => {}
+        }
+        f(self);
+    }
+}
+impl HirTypeWalk for TypeArgs {
+    fn walk(&self, f: &mut impl FnMut(&Type)) {
+        for t in self.0.iter() {
+            t.walk(f);
+        }
+    }
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        for t in make_mut_slice(&mut self.0) {
+            t.walk_mut(f);
+        }
+    }
+}
+impl HirTypeWalk for Bound {
+    fn walk(&self, f: &mut impl FnMut(&Type)) {
+        match self {
+            Bound::Trait(tr) => {
+                tr.walk(f);
+            }
+            Bound::AssocTypeBinding(b) => {
+                b.walk(f);
+            }
+            Bound::Error => {}
+        }
+    }
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        match self {
+            Bound::Trait(tr) => {
+                tr.walk_mut(f);
+            }
+            Bound::AssocTypeBinding(b) => {
+                b.walk_mut(f);
+            }
+            Bound::Error => {}
+        }
+    }
+}
+impl HirTypeWalk for TraitBound {
+    fn walk(&self, f: &mut impl FnMut(&Type)) {
+        self.arguments.walk(f);
+    }
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        self.arguments.walk_mut(f);
+    }
+}
+impl HirTypeWalk for AssocTypeBinding {
+    fn walk(&self, f: &mut impl FnMut(&Type)) {
+        self.ty.walk(f);
+        self.arguments.walk(f);
+    }
+    fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type)) {
+        self.ty.walk_mut(f);
+        self.arguments.walk_mut(f);
+    }
+}
 
-pub(crate) fn substitute<T: HirTypeWalk>(generics: &crate::Generics, t: T, args: TypeArgs) -> T {
-    todo!()
+pub(crate) fn substitute<T: HirTypeWalk>(
+    generics: &crate::Generics,
+    mut t: T,
+    args: TypeArgs,
+) -> T {
+    t.walk_mut(&mut |ty| match ty {
+        Type::Placeholder(param_id) => {
+            if let Some(idx) = generics.param_idx(*param_id) {
+                *ty = args[idx].clone();
+            }
+        }
+        _ => {}
+    });
+    t
 }
 
 pub(crate) use lower::{
