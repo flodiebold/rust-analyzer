@@ -21,8 +21,8 @@ use hir_def::{
 };
 
 use super::{
-    substitute, ApplicationType, Bound, OpaqueType, ProjectionType, TraitBound, Type, TypeArgs,
-    TypeName,
+    substitute, ApplicationType, Bound, HirTypeWalk, OpaqueType, ProjectionType, TraitBound, Type,
+    TypeArgs, TypeName,
 };
 use crate::{
     db::HirDatabase,
@@ -719,5 +719,34 @@ pub(crate) fn generic_bounds_for_param_recover(
 }
 
 pub(crate) fn generic_defaults_query(db: &dyn HirDatabase, def: GenericDefId) -> Arc<[Type]> {
-    todo!()
+    let resolver = def.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver);
+    let generic_params = generics(db.upcast(), def);
+
+    let defaults = generic_params
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, p))| {
+            let mut ty = p.default.as_ref().map_or(Type::Infer, |t| ctx.lower_type(t));
+
+            // Each default can only refer to previous parameters.
+            ty.walk_mut(&mut |ty| match ty {
+                Type::Placeholder(param_id) => {
+                    let param_idx =
+                        generic_params.param_idx(*param_id).expect("generic param without index");
+                    if param_idx >= idx {
+                        // type variable default referring to parameter coming
+                        // after it. This is forbidden (FIXME: report
+                        // diagnostic)
+                        *ty = Type::Error;
+                    }
+                }
+                _ => {}
+            });
+
+            ty
+        })
+        .collect();
+
+    defaults
 }
