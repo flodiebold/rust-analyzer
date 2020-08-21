@@ -12,7 +12,8 @@ use crate::{
     OpaqueTyId,
 };
 
-mod lower;
+// FIXME make this private once lowering only goes through queries
+pub(super) mod lower;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum TypeName {

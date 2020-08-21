@@ -301,6 +301,7 @@ impl<'a> InferenceContext<'a> {
         self.normalize_associated_types_in(ty)
     }
 
+    // FIXME all instances of this should be using a `Type` obtained from some query (i.e. lowering should happen outside of inference)
     fn make_ty(&mut self, type_ref: &TypeRef) -> Ty {
         self.make_ty_with_mode(type_ref, ImplTraitLoweringMode::Disallowed)
     }
