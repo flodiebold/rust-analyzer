@@ -22,7 +22,7 @@ use hir_def::{
 
 use super::{
     substitute, ApplicationType, Bound, HirTypeWalk, OpaqueType, ProjectionType, TraitBound, Type,
-    TypeArgs, TypeName,
+    TypeArgs, TypeName, AssocTypeBinding,
 };
 use crate::{
     db::HirDatabase,
@@ -33,7 +33,8 @@ use crate::{
 use hir_expand::name::Name;
 use smallvec::SmallVec;
 
-struct Context<'a> {
+// FIXME make this private once lowering only goes through queries
+pub(crate) struct Context<'a> {
     db: &'a dyn HirDatabase,
     resolver: &'a Resolver,
     impl_trait_mode: ImplTraitLoweringMode,
@@ -516,7 +517,34 @@ impl<'a> Context<'a> {
         segment: PathSegment,
         acc: &mut SmallVec<[Bound; 1]>,
     ) {
-        todo!()
+        let bindings = match segment.args_and_bindings {
+            Some(a_and_b) => &a_and_b.bindings,
+            None => return,
+        };
+        for binding in bindings {
+            let found = associated_type_by_name_including_super_traits(
+                self.db,
+                trait_bound.clone(),
+                &binding.name,
+            );
+            let (super_trait_bound, associated_ty) = match found {
+                None => return,
+                Some(t) => t,
+            };
+            if let Some(type_ref) = &binding.type_ref {
+                let ty = self.lower_type(type_ref);
+                acc.push(Bound::AssocTypeBinding(AssocTypeBinding {
+                    associated_ty,
+                    arguments: super_trait_bound.arguments,
+                    ty,
+                }));
+            }
+
+            for bound in &binding.bounds {
+                // FIXME these have a different self parameter, so they need to be modeled differently
+                // acc.extend(self.lower_bound(bound));
+            }
+        }
     }
 }
 
