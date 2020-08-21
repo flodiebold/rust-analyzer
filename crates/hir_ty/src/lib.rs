@@ -484,6 +484,14 @@ impl SubstsBuilder {
         self.fill(iter::repeat(Ty::Unknown))
     }
 
+    /// Like `fill`, but expects `filler` to contain the exact number of missing
+    /// arguments.
+    pub fn fill_exact(mut self, filler: impl Iterator<Item = Ty>) -> Self {
+        self.vec.extend(filler);
+        assert_eq!(self.remaining(), 0);
+        self
+    }
+
     pub fn fill(mut self, filler: impl Iterator<Item = Ty>) -> Self {
         self.vec.extend(filler.take(self.remaining()));
         assert_eq!(self.remaining(), 0);

@@ -250,6 +250,7 @@ impl<'a> Context<'a> {
     ) -> (Type, Option<TypeNs>) {
         let ty = match resolution {
             TypeNs::TraitId(trait_) => {
+                // TODO: we want a self type here (e.g. <T as Trait>::Assoc)
                 let bounds = self.lower_resolved_path_to_bounds(trait_, resolved_segment);
                 let ty = if remaining_segments.len() == 1 {
                     // TODO: what to do with assoc type bindings?
@@ -280,6 +281,7 @@ impl<'a> Context<'a> {
                     // FIXME report error (ambiguous associated type)
                     Type::Error
                 } else {
+                    // FIXME forbid self type
                     Type::Dyn(bounds.into_boxed_slice().into())
                 };
                 return (ty, None);
@@ -347,11 +349,11 @@ impl<'a> Context<'a> {
         match typable {
             TyDefId::BuiltinType(builtin_type) => Type::simple(type_for_builtin(builtin_type)),
             TyDefId::AdtId(it) => {
-                let args = self.args_from_path_segment(segment, it.into(), infer_args);
+                let args = self.args_from_path_segment(segment, it.into(), infer_args, true);
                 Type::apply(TypeName::Adt(it), args)
             }
             TyDefId::TypeAliasId(it) => {
-                let args = self.args_from_path_segment(segment, it.into(), infer_args);
+                let args = self.args_from_path_segment(segment, it.into(), infer_args, true);
                 let generics = generics(self.db.upcast(), it.into());
                 substitute(&generics, self.db.type_alias_type(it), args)
             }
@@ -392,7 +394,7 @@ impl<'a> Context<'a> {
             }
         };
         if let Some(generic_def) = generic_def {
-            self.args_from_path_segment(segment, generic_def, infer_args)
+            self.args_from_path_segment(segment, generic_def, infer_args, true)
         } else {
             // FIXME forbid type args
             TypeArgs::empty()
@@ -404,12 +406,14 @@ impl<'a> Context<'a> {
         segment: PathSegment<'_>,
         generic_def: GenericDefId,
         infer_args: bool,
+        include_self: bool,
     ) -> TypeArgs {
         let mut substs = Vec::new();
         let def_generics = generics(self.db.upcast(), generic_def);
 
-        let (parent_params, self_params, type_params, impl_trait_params) =
+        let (parent_params, actual_self_params, type_params, impl_trait_params) =
             def_generics.provenance_split();
+        let self_params = if include_self { actual_self_params } else { 0 };
         let total_len = parent_params + self_params + type_params + impl_trait_params;
 
         substs.extend(iter::repeat(Type::Infer).take(parent_params));
@@ -420,6 +424,7 @@ impl<'a> Context<'a> {
             if !generic_args.has_self_type {
                 substs.extend(iter::repeat(Type::Infer).take(self_params));
             }
+            // FIXME: if !include_self, has_self_type should be an error
             let expected_num =
                 if generic_args.has_self_type { self_params + type_params } else { type_params };
             let skip = if generic_args.has_self_type && self_params == 0 { 1 } else { 0 };
@@ -440,9 +445,12 @@ impl<'a> Context<'a> {
         // (i.e. defaults aren't used).
         if !infer_args || had_explicit_args {
             let default_substs = self.db.generic_defaults_2(generic_def);
-            assert_eq!(total_len, default_substs.len());
+            let ignored_self_params = if !include_self { actual_self_params } else { 0 };
+            assert_eq!(total_len + ignored_self_params, default_substs.len());
 
-            for default_ty in default_substs.iter().skip(substs.len()) {
+            let skip = ignored_self_params + substs.len();
+
+            for default_ty in default_substs.iter().skip(skip) {
                 // each default can depend on the previous parameters
                 let substs_so_far = TypeArgs(substs.clone().into());
                 substs.push(substitute(&def_generics, default_ty.clone(), substs_so_far));
@@ -504,7 +512,7 @@ impl<'a> Context<'a> {
         trait_: TraitId,
         segment: PathSegment<'_>,
     ) -> SmallVec<[Bound; 1]> {
-        let arguments = self.args_from_path_segment(segment.clone(), trait_.into(), false);
+        let arguments = self.args_from_path_segment(segment.clone(), trait_.into(), false, false);
         let trait_bound = TraitBound { trait_, arguments };
         let mut result = SmallVec::from_buf([Bound::Trait(trait_bound.clone())]);
         self.lower_assoc_type_bindings(&trait_bound, segment, &mut result);

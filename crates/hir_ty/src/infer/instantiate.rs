@@ -1,5 +1,5 @@
 
-use crate::{Ty, hir::{TypeArgs, Type, TypeName, Bound, TraitBound, AssocTypeBinding}, Substs, ApplicationTy, ProjectionTy, TypeCtor, GenericPredicate, TraitRef, ProjectionPredicate};
+use crate::{Ty, hir::{TypeArgs, Type, TypeName, Bound, TraitBound, AssocTypeBinding}, Substs, ApplicationTy, ProjectionTy, TypeCtor, GenericPredicate, TraitRef, ProjectionPredicate, utils::generics};
 
 use super::InferenceContext;
 use chalk_ir::{DebruijnIndex, BoundVar};
@@ -14,6 +14,10 @@ impl<'a> InferenceContext<'a> {
                 })
             }
             Type::Projection(proj_ty) => {
+                debug_assert!({
+                    let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
+                    generics.len() == proj_ty.arguments.len()
+                });
                 Ty::Projection(ProjectionTy {
                     associated_ty: proj_ty.associated_ty,
                     parameters: self.instantiate_args(&proj_ty.arguments),
@@ -39,9 +43,9 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn instantiate_trait_bound(&mut self, trait_bound: &TraitBound, self_ty: Ty) -> TraitRef {
-        let substs = Substs::builder(trait_bound.arguments.len() + 1)
+        let substs = Substs::build_for_def(self.db, trait_bound.trait_)
             .push(self_ty)
-            .fill(trait_bound.arguments.iter().map(|typ| self.instantiate_type(typ)))
+            .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
         TraitRef {
             trait_: trait_bound.trait_,
@@ -50,9 +54,9 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn instantiate_assoc_type_binding(&mut self, assoc_type_binding: &AssocTypeBinding, self_ty: Ty) -> ProjectionPredicate {
-        let substs = Substs::builder(assoc_type_binding.arguments.len() + 1)
+        let substs = Substs::build_for_def(self.db, assoc_type_binding.associated_ty)
             .push(self_ty)
-            .fill(assoc_type_binding.arguments.iter().map(|typ| self.instantiate_type(typ)))
+            .fill_exact(assoc_type_binding.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
         let projection_ty = ProjectionTy {
             associated_ty: assoc_type_binding.associated_ty,
