@@ -251,14 +251,13 @@ impl<'a> Context<'a> {
         let ty = match resolution {
             TypeNs::TraitId(trait_) => {
                 // TODO: we want a self type here (e.g. <T as Trait>::Assoc)
-                let bounds = self.lower_resolved_path_to_bounds(trait_, resolved_segment);
                 let ty = if remaining_segments.len() == 1 {
-                    // TODO: what to do with assoc type bindings?
-                    let trait_bound = match &bounds[0] {
-                        Bound::Trait(tr) => tr.clone(),
-                        _ => todo!(),
-                    };
                     let segment = remaining_segments.first().unwrap();
+                    let arguments = self.args_from_path_segment(segment.clone(), trait_.into(), false, true);
+                    let trait_bound = TraitBound {
+                        trait_,
+                        arguments: arguments.iter().skip(1).cloned().collect()
+                    };
                     let associated_ty = associated_type_by_name_including_super_traits(
                         self.db,
                         trait_bound,
@@ -266,10 +265,13 @@ impl<'a> Context<'a> {
                     );
                     match associated_ty {
                         Some((trait_bound, associated_ty)) => {
+                            let arguments = iter::once(arguments[0].clone())
+                                .chain(trait_bound.arguments.iter().cloned())
+                                .collect();
                             // FIXME handle type parameters on the segment
                             Type::Projection(ProjectionType {
                                 associated_ty,
-                                arguments: trait_bound.arguments,
+                                arguments,
                             })
                         }
                         None => {
@@ -281,6 +283,7 @@ impl<'a> Context<'a> {
                     // FIXME report error (ambiguous associated type)
                     Type::Error
                 } else {
+                    let bounds = self.lower_resolved_path_to_bounds(trait_, resolved_segment);
                     // FIXME forbid self type
                     Type::Dyn(bounds.into_boxed_slice().into())
                 };
@@ -310,12 +313,12 @@ impl<'a> Context<'a> {
 
     fn select_associated_type(&self, res: Option<TypeNs>, segment: PathSegment<'_>) -> Type {
         if let Some(res) = res {
-            // TODO ??? this uses TraitRef
             let ty = associated_type_shorthand_candidates(
                 self.db,
                 res,
                 move |name, t, associated_ty| {
                     if name == segment.name {
+                        // TODO clearly doing something wrong here
                         let substs = TypeArgs::type_params(
                             self.db.upcast(),
                             self.resolver
