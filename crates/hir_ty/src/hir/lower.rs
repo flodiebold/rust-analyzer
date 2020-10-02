@@ -232,7 +232,7 @@ impl<'a> Context<'a> {
         if remaining_segments.len() == 1 {
             // resolve unselected assoc types
             let segment = remaining_segments.first().unwrap();
-            (self.select_associated_type(res, segment), None)
+            (self.select_associated_type(relative_to, res, segment), None)
         } else if remaining_segments.len() > 1 {
             // FIXME report error (ambiguous associated type)
             (Type::Error, None)
@@ -311,24 +311,20 @@ impl<'a> Context<'a> {
         self.lower_type_relative_path(ty, Some(resolution), remaining_segments)
     }
 
-    fn select_associated_type(&self, res: Option<TypeNs>, segment: PathSegment<'_>) -> Type {
+    fn select_associated_type(&self, relative_to: Type, res: Option<TypeNs>, segment: PathSegment<'_>) -> Type {
         if let Some(res) = res {
             let ty = associated_type_shorthand_candidates(
                 self.db,
                 res,
                 move |name, t, associated_ty| {
                     if name == segment.name {
-                        // TODO clearly doing something wrong here
-                        let substs = TypeArgs::type_params(
-                            self.db.upcast(),
-                            self.resolver
-                                .generic_def()
-                                .expect("there should be generics if there's a generic param"),
-                        );
+                        let arguments = iter::once(relative_to.clone())
+                            .chain(t.arguments.iter().cloned())
+                            .collect();
                         // FIXME handle (forbid) type parameters on the segment
                         return Some(Type::Projection(ProjectionType {
                             associated_ty,
-                            arguments: substs,
+                            arguments,
                         }));
                     }
 
@@ -645,7 +641,7 @@ pub fn associated_type_shorthand_candidates<R>(
 ) -> Option<R> {
     let traits_from_env: Vec<_> = match res {
         TypeNs::SelfType(impl_id) => match db.impl_trait_2(impl_id) {
-            None => vec![],
+            None => return None,
             Some(trait_ref) => vec![trait_ref],
         },
         TypeNs::GenericParam(param_id) => {
@@ -672,7 +668,7 @@ pub fn associated_type_shorthand_candidates<R>(
             }
             traits_
         }
-        _ => vec![],
+        _ => return None,
     };
 
     for t in traits_from_env.into_iter().flat_map(move |t| all_super_trait_bounds(db, t)) {
