@@ -642,7 +642,7 @@ pub fn associated_type_shorthand_candidates<R>(
     let traits_from_env: Vec<_> = match res {
         TypeNs::SelfType(impl_id) => match db.impl_trait_2(impl_id) {
             None => return None,
-            Some(trait_ref) => vec![trait_ref],
+            Some(trait_bound) => vec![trait_bound],
         },
         TypeNs::GenericParam(param_id) => {
             let predicates = db.generic_bounds_for_param(param_id);

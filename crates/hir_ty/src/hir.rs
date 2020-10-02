@@ -2,6 +2,7 @@
 
 use std::{iter::FromIterator, sync::Arc};
 
+use hir_def::generics::TypeParamProvenance;
 use hir_def::{
     db::DefDatabase, type_ref::Mutability, AdtId, GenericDefId, TraitId, TypeAliasId, TypeParamId,
 };
@@ -11,6 +12,12 @@ use crate::{
     utils::make_mut_slice,
     OpaqueTyId,
 };
+
+/*
+ TODO:
+  - reconsider leaving out self type
+    - substituting is more complicated
+ */
 
 // FIXME make this private once lowering only goes through queries
 pub(super) mod lower;
@@ -195,7 +202,7 @@ impl TypeArgs {
     }
 
     pub(crate) fn type_params_for_generics(generics: &crate::Generics) -> Self {
-        generics.iter().map(|(id, _)| Type::Placeholder(id)).collect()
+        generics.iter().filter(|(_, data)| data.provenance != TypeParamProvenance::TraitSelf).map(|(id, _)| Type::Placeholder(id)).collect()
     }
 
     pub fn type_params(db: &dyn DefDatabase, def: GenericDefId) -> Self {
@@ -323,11 +330,13 @@ impl HirTypeWalk for AssocTypeBinding {
     }
 }
 
-pub(crate) fn substitute<T: HirTypeWalk>(
+pub(crate) fn substitute<T: HirTypeWalk + std::fmt::Debug>(
     generics: &crate::Generics,
     mut t: T,
     args: TypeArgs,
 ) -> T {
+    // TODO: self type
+    eprintln!("substitute {:?} with {:?}", t, args);
     t.walk_mut(&mut |ty| match ty {
         Type::Placeholder(param_id) => {
             if let Some(idx) = generics.param_idx(*param_id) {

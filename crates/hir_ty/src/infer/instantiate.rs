@@ -17,7 +17,7 @@ impl<'a> InferenceContext<'a> {
                 debug_assert!({
                     let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
                     generics.len() == proj_ty.arguments.len()
-                });
+                }, "proj_ty: {:?}", proj_ty);
                 Ty::Projection(ProjectionTy {
                     associated_ty: proj_ty.associated_ty,
                     parameters: self.instantiate_args(&proj_ty.arguments),
