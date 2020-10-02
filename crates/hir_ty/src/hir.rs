@@ -129,6 +129,7 @@ pub struct OpaqueType {
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct ProjectionType {
     pub associated_ty: TypeAliasId,
+    // FIXME: instead provide self type and trait args separately?
     pub arguments: TypeArgs,
 }
 

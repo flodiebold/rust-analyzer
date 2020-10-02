@@ -253,7 +253,7 @@ impl<'a> Context<'a> {
                 // TODO: we want a self type here (e.g. <T as Trait>::Assoc)
                 let ty = if remaining_segments.len() == 1 {
                     let segment = remaining_segments.first().unwrap();
-                    let arguments = self.args_from_path_segment(segment.clone(), trait_.into(), false, true);
+                    let arguments = self.args_from_path_segment(resolved_segment, trait_.into(), false, true);
                     let trait_bound = TraitBound {
                         trait_,
                         arguments: arguments.iter().skip(1).cloned().collect()
