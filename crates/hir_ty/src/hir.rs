@@ -335,12 +335,12 @@ pub(crate) fn substitute<T: HirTypeWalk + std::fmt::Debug>(
     mut t: T,
     args: TypeArgs,
 ) -> T {
-    // TODO: self type
-    eprintln!("substitute {:?} with {:?}", t, args);
+    // self params are skipped in the HIR
+    let (_, self_params, _, _) = generics.provenance_split();
     t.walk_mut(&mut |ty| match ty {
         Type::Placeholder(param_id) => {
             if let Some(idx) = generics.param_idx(*param_id) {
-                *ty = args[idx].clone();
+                *ty = args[idx - self_params].clone();
             }
         }
         _ => {}
