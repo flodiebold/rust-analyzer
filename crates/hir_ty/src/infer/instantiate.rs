@@ -24,10 +24,11 @@ impl<'a> InferenceContext<'a> {
                     "proj_ty: {:?}",
                     proj_ty
                 );
-                Ty::Projection(ProjectionTy {
+                let projection_ty = ProjectionTy {
                     associated_ty: proj_ty.associated_ty,
                     parameters: self.instantiate_args(&proj_ty.arguments),
-                })
+                };
+                self.normalize_projection_ty(projection_ty)
             }
             Type::Opaque(_) => todo!(),
             Type::Placeholder(param_id) => Ty::Placeholder(*param_id),

@@ -70,7 +70,7 @@ pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<Infer
 
     match def {
         DefWithBodyId::ConstId(c) => ctx.collect_const(&db.const_data(c)),
-        DefWithBodyId::FunctionId(f) => ctx.collect_fn(&db.function_data(f)),
+        DefWithBodyId::FunctionId(f) => ctx.collect_fn(f),
         DefWithBodyId::StaticId(s) => ctx.collect_static(&db.static_data(s)),
     }
 
@@ -292,13 +292,13 @@ impl<'a> InferenceContext<'a> {
     fn make_ty_with_mode(
         &mut self,
         type_ref: &TypeRef,
-        impl_trait_mode: ImplTraitLoweringMode,
+        _impl_trait_mode: ImplTraitLoweringMode,
     ) -> Ty {
         // FIXME use right resolver for block
         let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
         let typ = ctx.lower_type(type_ref);
         let ty = self.instantiate_type(&typ);
-        self.normalize_associated_types_in(ty)
+        ty
     }
 
     // FIXME all instances of this should be using a `Type` obtained from some query (i.e. lowering should happen outside of inference)
@@ -534,19 +534,15 @@ impl<'a> InferenceContext<'a> {
         self.return_ty = self.make_ty(&data.type_ref);
     }
 
-    fn collect_fn(&mut self, data: &FunctionData) {
+    fn collect_fn(&mut self, f: FunctionId) {
         let body = Arc::clone(&self.body); // avoid borrow checker problem
-        let ctx = crate::lower::TyLoweringContext::new(self.db, &self.resolver)
-            .with_impl_trait_mode(ImplTraitLoweringMode::Param);
-        let param_tys =
-            data.params.iter().map(|type_ref| Ty::from_hir(&ctx, type_ref)).collect::<Vec<_>>();
-        for (ty, pat) in param_tys.into_iter().zip(body.params.iter()) {
-            let ty = self.insert_type_vars(ty);
-            let ty = self.normalize_associated_types_in(ty);
+        let sig = self.db.function_signature(f);
+        for (typ, pat) in sig.params().into_iter().zip(body.params.iter()) {
+            let ty = self.instantiate_type(typ);
 
             self.infer_pat(*pat, &ty, BindingMode::default());
         }
-        let return_ty = self.make_ty_with_mode(&data.ret_type, ImplTraitLoweringMode::Disallowed); // FIXME implement RPIT
+        let return_ty = self.instantiate_type(sig.ret()); // FIXME implement RPIT
         self.return_ty = return_ty;
     }
 

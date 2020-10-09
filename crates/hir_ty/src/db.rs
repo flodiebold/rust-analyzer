@@ -58,6 +58,9 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::invoke(crate::lower::field_types_query)]
     fn field_types(&self, var: VariantId) -> Arc<ArenaMap<LocalFieldId, Binders<Ty>>>;
 
+    #[salsa::invoke(crate::hir::function_signature_query)]
+    fn function_signature(&self, f: FunctionId) -> crate::hir::FnSig;
+
     #[salsa::invoke(crate::callable_item_sig)]
     fn callable_item_signature(&self, def: CallableDefId) -> PolyFnSig;
 

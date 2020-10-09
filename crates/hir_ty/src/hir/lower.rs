@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use hir_def::FunctionId;
 use hir_def::{
     builtin_type::BuiltinType,
     generics::{TypeParamProvenance, WherePredicateTarget},
@@ -20,6 +21,7 @@ use hir_def::{
     AssocItemId, GenericDefId, ImplId, TraitId, TypeAliasId, TypeParamId,
 };
 
+use super::FnSig;
 use super::{
     substitute, ApplicationType, AssocTypeBinding, Bound, HirTypeWalk, OpaqueType, ProjectionType,
     TraitBound, Type, TypeArgs, TypeName,
@@ -250,7 +252,6 @@ impl<'a> Context<'a> {
     ) -> (Type, Option<TypeNs>) {
         let ty = match resolution {
             TypeNs::TraitId(trait_) => {
-                // TODO: we want a self type here (e.g. <T as Trait>::Assoc)
                 let ty = if remaining_segments.len() == 1 {
                     let segment = remaining_segments.first().unwrap();
                     let arguments =
@@ -548,7 +549,8 @@ impl<'a> Context<'a> {
             }
 
             for bound in &binding.bounds {
-                // FIXME these have a different self parameter, so they need to be modeled differently
+                // TODO these have a different self parameter, so they need to be modeled differently
+                // TODO also add a test for these
                 // acc.extend(self.lower_bound(bound));
             }
         }
@@ -784,4 +786,14 @@ pub(crate) fn generic_defaults_query(db: &dyn HirDatabase, def: GenericDefId) ->
         .collect();
 
     defaults
+}
+
+pub(crate) fn function_signature_query(db: &dyn HirDatabase, f: FunctionId) -> FnSig {
+    let data = db.function_data(f);
+    let resolver = f.resolver(db.upcast());
+    let ctx_param = Context::new(db, &resolver).with_impl_trait_mode(ImplTraitLoweringMode::Param);
+    let params = data.params.iter().map(|tr| ctx_param.lower_type(tr)).collect::<Vec<_>>();
+    let ctx_ret = ctx_param.with_impl_trait_mode(ImplTraitLoweringMode::Opaque);
+    let ret = ctx_ret.lower_type(&data.ret_type);
+    FnSig::from_params_and_return(params, ret, data.is_varargs)
 }

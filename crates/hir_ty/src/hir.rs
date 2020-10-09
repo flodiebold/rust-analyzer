@@ -346,8 +346,35 @@ pub(crate) fn substitute<T: HirTypeWalk + std::fmt::Debug>(
     t
 }
 
+/// A function signature as seen by type inference: Several parameter types and
+/// one return type.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FnSig {
+    params_and_return: Arc<[Type]>,
+    is_varargs: bool,
+}
+
+impl FnSig {
+    pub fn from_params_and_return(mut params: Vec<Type>, ret: Type, is_varargs: bool) -> FnSig {
+        params.push(ret);
+        FnSig { params_and_return: params.into(), is_varargs }
+    }
+
+    pub fn from_fn_ptr_args(args: &TypeArgs, is_varargs: bool) -> FnSig {
+        FnSig { params_and_return: Arc::clone(&args.0), is_varargs }
+    }
+
+    pub fn params(&self) -> &[Type] {
+        &self.params_and_return[0..self.params_and_return.len() - 1]
+    }
+
+    pub fn ret(&self) -> &Type {
+        &self.params_and_return[self.params_and_return.len() - 1]
+    }
+}
+
 pub(crate) use lower::{
     generic_bounds_for_param_query, generic_bounds_for_param_recover, generic_defaults_query,
     impl_self_ty_query, impl_self_ty_recover, impl_trait_query, type_alias_type_query,
-    type_alias_type_recover,
+    type_alias_type_recover, function_signature_query,
 };
