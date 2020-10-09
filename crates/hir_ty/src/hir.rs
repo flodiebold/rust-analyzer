@@ -13,12 +13,6 @@ use crate::{
     OpaqueTyId,
 };
 
-/*
- TODO:
-  - reconsider leaving out self type
-    - substituting is more complicated
- */
-
 // FIXME make this private once lowering only goes through queries
 pub(super) mod lower;
 
@@ -202,7 +196,11 @@ impl TypeArgs {
     }
 
     pub(crate) fn type_params_for_generics(generics: &crate::Generics) -> Self {
-        generics.iter().filter(|(_, data)| data.provenance != TypeParamProvenance::TraitSelf).map(|(id, _)| Type::Placeholder(id)).collect()
+        generics
+            .iter()
+            .filter(|(_, data)| data.provenance != TypeParamProvenance::TraitSelf)
+            .map(|(id, _)| Type::Placeholder(id))
+            .collect()
     }
 
     pub fn type_params(db: &dyn DefDatabase, def: GenericDefId) -> Self {

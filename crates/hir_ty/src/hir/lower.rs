@@ -21,8 +21,8 @@ use hir_def::{
 };
 
 use super::{
-    substitute, ApplicationType, Bound, HirTypeWalk, OpaqueType, ProjectionType, TraitBound, Type,
-    TypeArgs, TypeName, AssocTypeBinding,
+    substitute, ApplicationType, AssocTypeBinding, Bound, HirTypeWalk, OpaqueType, ProjectionType,
+    TraitBound, Type, TypeArgs, TypeName,
 };
 use crate::{
     db::HirDatabase,
@@ -253,10 +253,11 @@ impl<'a> Context<'a> {
                 // TODO: we want a self type here (e.g. <T as Trait>::Assoc)
                 let ty = if remaining_segments.len() == 1 {
                     let segment = remaining_segments.first().unwrap();
-                    let arguments = self.args_from_path_segment(resolved_segment, trait_.into(), false, true);
+                    let arguments =
+                        self.args_from_path_segment(resolved_segment, trait_.into(), false, true);
                     let trait_bound = TraitBound {
                         trait_,
-                        arguments: arguments.iter().skip(1).cloned().collect()
+                        arguments: arguments.iter().skip(1).cloned().collect(),
                     };
                     let associated_ty = associated_type_by_name_including_super_traits(
                         self.db,
@@ -269,10 +270,7 @@ impl<'a> Context<'a> {
                                 .chain(trait_bound.arguments.iter().cloned())
                                 .collect();
                             // FIXME handle type parameters on the segment
-                            Type::Projection(ProjectionType {
-                                associated_ty,
-                                arguments,
-                            })
+                            Type::Projection(ProjectionType { associated_ty, arguments })
                         }
                         None => {
                             // FIXME: report error (associated type not found)
@@ -311,7 +309,12 @@ impl<'a> Context<'a> {
         self.lower_type_relative_path(ty, Some(resolution), remaining_segments)
     }
 
-    fn select_associated_type(&self, relative_to: Type, res: Option<TypeNs>, segment: PathSegment<'_>) -> Type {
+    fn select_associated_type(
+        &self,
+        relative_to: Type,
+        res: Option<TypeNs>,
+        segment: PathSegment<'_>,
+    ) -> Type {
         if let Some(res) = res {
             let ty = associated_type_shorthand_candidates(
                 self.db,
@@ -322,10 +325,7 @@ impl<'a> Context<'a> {
                             .chain(t.arguments.iter().cloned())
                             .collect();
                         // FIXME handle (forbid) type parameters on the segment
-                        return Some(Type::Projection(ProjectionType {
-                            associated_ty,
-                            arguments,
-                        }));
+                        return Some(Type::Projection(ProjectionType { associated_ty, arguments }));
                     }
 
                     None

@@ -1,23 +1,29 @@
-
-use crate::{Ty, hir::{TypeArgs, Type, TypeName, Bound, TraitBound, AssocTypeBinding}, Substs, ApplicationTy, ProjectionTy, TypeCtor, GenericPredicate, TraitRef, ProjectionPredicate, utils::generics};
+use crate::{
+    hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName},
+    utils::generics,
+    ApplicationTy, GenericPredicate, ProjectionPredicate, ProjectionTy, Substs, TraitRef, Ty,
+    TypeCtor,
+};
 
 use super::InferenceContext;
-use chalk_ir::{DebruijnIndex, BoundVar};
+use chalk_ir::{BoundVar, DebruijnIndex};
 
 impl<'a> InferenceContext<'a> {
     pub(super) fn instantiate_type(&mut self, typ: &Type) -> Ty {
         match typ {
-            Type::Apply(apply_ty) => {
-                Ty::Apply(ApplicationTy {
-                    ctor: instantiate_ctor(apply_ty.name),
-                    parameters: self.instantiate_args(&apply_ty.arguments),
-                })
-            }
+            Type::Apply(apply_ty) => Ty::Apply(ApplicationTy {
+                ctor: instantiate_ctor(apply_ty.name),
+                parameters: self.instantiate_args(&apply_ty.arguments),
+            }),
             Type::Projection(proj_ty) => {
-                debug_assert!({
-                    let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
-                    generics.len() == proj_ty.arguments.len()
-                }, "proj_ty: {:?}", proj_ty);
+                debug_assert!(
+                    {
+                        let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
+                        generics.len() == proj_ty.arguments.len()
+                    },
+                    "proj_ty: {:?}",
+                    proj_ty
+                );
                 Ty::Projection(ProjectionTy {
                     associated_ty: proj_ty.associated_ty,
                     parameters: self.instantiate_args(&proj_ty.arguments),
@@ -28,7 +34,7 @@ impl<'a> InferenceContext<'a> {
             Type::Dyn(bounds) => {
                 let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
                 Ty::Dyn(bounds.iter().map(|b| self.instantiate_bound(b, self_ty.clone())).collect())
-            },
+            }
             Type::Infer => self.table.new_type_var(),
             Type::Error => Ty::Unknown,
         }
@@ -36,8 +42,12 @@ impl<'a> InferenceContext<'a> {
 
     fn instantiate_bound(&mut self, bound: &Bound, self_ty: Ty) -> GenericPredicate {
         match bound {
-            Bound::Trait(trait_bound) => GenericPredicate::Implemented(self.instantiate_trait_bound(trait_bound, self_ty)),
-            Bound::AssocTypeBinding(assoc_type_binding) => GenericPredicate::Projection(self.instantiate_assoc_type_binding(assoc_type_binding, self_ty)),
+            Bound::Trait(trait_bound) => {
+                GenericPredicate::Implemented(self.instantiate_trait_bound(trait_bound, self_ty))
+            }
+            Bound::AssocTypeBinding(assoc_type_binding) => GenericPredicate::Projection(
+                self.instantiate_assoc_type_binding(assoc_type_binding, self_ty),
+            ),
             Bound::Error => GenericPredicate::Error,
         }
     }
@@ -47,26 +57,22 @@ impl<'a> InferenceContext<'a> {
             .push(self_ty)
             .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
-        TraitRef {
-            trait_: trait_bound.trait_,
-            substs,
-        }
+        TraitRef { trait_: trait_bound.trait_, substs }
     }
 
-    fn instantiate_assoc_type_binding(&mut self, assoc_type_binding: &AssocTypeBinding, self_ty: Ty) -> ProjectionPredicate {
+    fn instantiate_assoc_type_binding(
+        &mut self,
+        assoc_type_binding: &AssocTypeBinding,
+        self_ty: Ty,
+    ) -> ProjectionPredicate {
         let substs = Substs::build_for_def(self.db, assoc_type_binding.associated_ty)
             .push(self_ty)
             .fill_exact(assoc_type_binding.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
-        let projection_ty = ProjectionTy {
-            associated_ty: assoc_type_binding.associated_ty,
-            parameters: substs,
-        };
+        let projection_ty =
+            ProjectionTy { associated_ty: assoc_type_binding.associated_ty, parameters: substs };
         let ty = self.instantiate_type(&assoc_type_binding.ty);
-        ProjectionPredicate {
-            projection_ty,
-            ty,
-        }
+        ProjectionPredicate { projection_ty, ty }
     }
 
     fn instantiate_args(&mut self, args: &TypeArgs) -> Substs {
