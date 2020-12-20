@@ -11,14 +11,13 @@ use std::{
     sync::Arc,
 };
 
-use hir_def::FunctionId;
 use hir_def::{
     builtin_type::BuiltinType,
-    generics::{TypeParamProvenance, WherePredicateTarget},
+    generics::{TypeParamProvenance, WherePredicate, WherePredicateTypeTarget},
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AssocItemId, GenericDefId, ImplId, TraitId, TypeAliasId, TypeParamId,
+    AssocItemId, FunctionId, GenericDefId, ImplId, TraitId, TypeAliasId, TypeParamId,
 };
 
 use super::FnSig;
@@ -100,7 +99,7 @@ impl<'a> Context<'a> {
                 let inner_ty = self.lower_type(inner);
                 Type::apply_one(TypeName::Slice, inner_ty)
             }
-            TypeRef::Reference(inner, mutability) => {
+            TypeRef::Reference(inner, _lifetime, mutability) => {
                 let inner_ty = self.lower_type(inner);
                 Type::apply_one(TypeName::Ref(*mutability), inner_ty)
             }
@@ -436,6 +435,7 @@ impl<'a> Context<'a> {
                         let ty = self.lower_type(type_ref);
                         substs.push(ty);
                     }
+                    GenericArg::Lifetime(_) => {}
                 }
             }
         }
@@ -470,6 +470,7 @@ impl<'a> Context<'a> {
     pub fn lower_bound(&self, bound: &TypeBound) -> SmallVec<[Bound; 1]> {
         match bound {
             TypeBound::Path(path) => self.lower_path_to_bounds(path),
+            TypeBound::Lifetime(_) => SmallVec::new(),
             TypeBound::Error => SmallVec::from_buf([Bound::Error]),
         }
     }
@@ -737,13 +738,24 @@ pub(crate) fn generic_bounds_for_param_query(
     resolver
         .where_predicates_in_scope()
         // we have to filter out all other predicates *first*, before attempting to lower them
-        .filter(|pred| match &pred.target {
-            WherePredicateTarget::TypeRef(type_ref) => {
-                ctx.lower_only_param(type_ref) == Some(param_id)
-            }
-            WherePredicateTarget::TypeParam(local_id) => *local_id == param_id.local_id,
+        .filter(|pred| match &pred {
+            WherePredicate::ForLifetime { target, .. }
+            | WherePredicate::TypeBound { target, .. } => match target {
+                WherePredicateTypeTarget::TypeRef(type_ref) => {
+                    ctx.lower_only_param(type_ref) == Some(param_id)
+                }
+                WherePredicateTypeTarget::TypeParam(local_id) => *local_id == param_id.local_id,
+            },
+            WherePredicate::Lifetime { .. } => false,
         })
-        .flat_map(|pred| ctx.lower_bound(&pred.bound))
+        .flat_map(|pred| match pred {
+            WherePredicate::TypeBound { bound, .. } | WherePredicate::ForLifetime { bound, .. } => {
+                ctx.lower_bound(bound)
+            }
+            WherePredicate::Lifetime { target, bound } => {
+                unreachable!()
+            }
+        })
         .collect()
 }
 pub(crate) fn generic_bounds_for_param_recover(

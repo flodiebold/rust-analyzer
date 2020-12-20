@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use hir_def::{
     body::Body,
-    data::{ConstData, FunctionData, StaticData},
+    data::{ConstData, StaticData},
     expr::{ArithOp, BinaryOp, BindingAnnotation, ExprId, PatId},
     lang_item::LangItemTarget,
     path::{path, Path},
