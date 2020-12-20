@@ -1,8 +1,8 @@
 use crate::{
     hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName},
     utils::generics,
-    ApplicationTy, GenericPredicate, ProjectionPredicate, ProjectionTy, Substs, TraitRef, Ty,
-    TypeCtor,
+    ApplicationTy, GenericPredicate, OpaqueTy, ProjectionPredicate, ProjectionTy, Substs, TraitRef,
+    Ty, TypeCtor,
 };
 
 use super::InferenceContext;
@@ -30,7 +30,10 @@ impl<'a> InferenceContext<'a> {
                 };
                 self.normalize_projection_ty(projection_ty)
             }
-            Type::Opaque(_) => todo!(),
+            Type::Opaque(opaque_ty) => Ty::Opaque(OpaqueTy {
+                opaque_ty_id: opaque_ty.opaque_ty_id,
+                parameters: self.instantiate_args(&opaque_ty.arguments),
+            }),
             Type::Placeholder(param_id) => Ty::Placeholder(*param_id),
             Type::Dyn(bounds) => {
                 let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
