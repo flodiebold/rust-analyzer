@@ -7,7 +7,7 @@ use chalk_ir::{
     cast::Cast, fold::shift::Shift, interner::HasInterner, LifetimeData, PlaceholderIndex, Scalar,
     UniverseIndex,
 };
-use chalk_solve::rust_ir;
+use chalk_solve::rust_ir::{self, IntoWhereClauses};
 
 use base_db::salsa::InternKey;
 use hir_def::{type_ref::Mutability, AssocContainerId, GenericDefId, Lookup, TypeAliasId};
@@ -288,10 +288,7 @@ fn ref_to_chalk(
     chalk_ir::TyKind::Ref(mutability.to_chalk(db), lifetime, arg).intern(&Interner)
 }
 
-/// We currently don't model constants, but Chalk does. So, we have to insert a
-/// fake constant here, because Chalks built-in logic may expect it to be there.
-fn array_to_chalk(db: &dyn HirDatabase, subst: Substs) -> chalk_ir::Ty<Interner> {
-    let arg = subst[0].clone().to_chalk(db);
+fn make_const_usize() -> chalk_ir::Const<Interner> {
     let usize_ty =
         chalk_ir::TyKind::Scalar(Scalar::Uint(chalk_ir::UintTy::Usize)).intern(&Interner);
     let const_ = chalk_ir::ConstData {
@@ -299,6 +296,14 @@ fn array_to_chalk(db: &dyn HirDatabase, subst: Substs) -> chalk_ir::Ty<Interner>
         value: chalk_ir::ConstValue::Concrete(chalk_ir::ConcreteConst { interned: () }),
     }
     .intern(&Interner);
+    const_
+}
+
+/// We currently don't model constants, but Chalk does. So, we have to insert a
+/// fake constant here, because Chalks built-in logic may expect it to be there.
+fn array_to_chalk(db: &dyn HirDatabase, subst: Substs) -> chalk_ir::Ty<Interner> {
+    let arg = subst[0].clone().to_chalk(db);
+    let const_ = make_const_usize();
     chalk_ir::TyKind::Array(arg, const_).intern(&Interner)
 }
 
@@ -725,6 +730,185 @@ where
     }
 }
 
+use crate::hir;
+impl ToChalk for hir::Type {
+    type Chalk = chalk_ir::Ty<Interner>;
+    fn to_chalk(self, db: &dyn HirDatabase) -> chalk_ir::Ty<Interner> {
+        match self {
+            hir::Type::Apply(apply_ty) => match apply_ty.name {
+                hir::TypeName::Ref(m) => {
+                    let arg = apply_ty.arguments[0].clone().to_chalk(db);
+                    let lifetime = LifetimeData::Static.intern(&Interner);
+                    chalk_ir::TyKind::Ref(m.to_chalk(db), lifetime, arg).intern(&Interner)
+                },
+                hir::TypeName::Array => {
+                    let arg = apply_ty.arguments[0].clone().to_chalk(db);
+                    let const_ = make_const_usize();
+                    chalk_ir::TyKind::Array(arg, const_).intern(&Interner)
+                },
+                hir::TypeName::FnPtr { num_args: _, is_varargs } => {
+                    let substitution =
+                        chalk_ir::FnSubst(apply_ty.arguments.to_chalk(db).shifted_in(&Interner));
+                    chalk_ir::TyKind::Function(chalk_ir::FnPointer {
+                        num_binders: 0,
+                        sig: chalk_ir::FnSig {
+                            abi: (),
+                            safety: chalk_ir::Safety::Safe,
+                            variadic: is_varargs,
+                        },
+                        substitution,
+                    })
+                        .intern(&Interner)
+                }
+
+                // hir::TypeName::ForeignType(type_alias) => {
+                //     let foreign_type = TypeAliasAsForeignType(type_alias);
+                //     let foreign_type_id = foreign_type.to_chalk(db);
+                //     chalk_ir::TyKind::Foreign(foreign_type_id).intern(&Interner)
+                // }
+
+                hir::TypeName::Bool => chalk_ir::TyKind::Scalar(Scalar::Bool).intern(&Interner),
+                hir::TypeName::Char => chalk_ir::TyKind::Scalar(Scalar::Char).intern(&Interner),
+                hir::TypeName::Int(int_ty) => {
+                    chalk_ir::TyKind::Scalar(int_ty_to_chalk(int_ty)).intern(&Interner)
+                }
+                hir::TypeName::Float(FloatTy { bitness: FloatBitness::X32 }) => {
+                    chalk_ir::TyKind::Scalar(Scalar::Float(chalk_ir::FloatTy::F32))
+                        .intern(&Interner)
+                }
+                hir::TypeName::Float(FloatTy { bitness: FloatBitness::X64 }) => {
+                    chalk_ir::TyKind::Scalar(Scalar::Float(chalk_ir::FloatTy::F64))
+                        .intern(&Interner)
+                }
+
+                hir::TypeName::Tuple { cardinality } => {
+                    let substitution = apply_ty.arguments.to_chalk(db);
+                    chalk_ir::TyKind::Tuple(cardinality.into(), substitution).intern(&Interner)
+                }
+                hir::TypeName::RawPtr(mutability) => {
+                    let ty = apply_ty.arguments[0].clone().to_chalk(db);
+                    chalk_ir::TyKind::Raw(mutability.to_chalk(db), ty).intern(&Interner)
+                }
+                hir::TypeName::Slice => {
+                    chalk_ir::TyKind::Slice(apply_ty.arguments[0].clone().to_chalk(db))
+                        .intern(&Interner)
+                }
+                hir::TypeName::Str => chalk_ir::TyKind::Str.intern(&Interner),
+                hir::TypeName::Never => chalk_ir::TyKind::Never.intern(&Interner),
+
+                hir::TypeName::Adt(adt_id) => {
+                    let substitution = apply_ty.arguments.to_chalk(db);
+                    chalk_ir::TyKind::Adt(chalk_ir::AdtId(adt_id), substitution).intern(&Interner)
+                }
+            },
+            hir::Type::Projection(proj_ty) => {
+                let associated_ty_id = TypeAliasAsAssocType(proj_ty.associated_ty).to_chalk(db);
+                let substitution = proj_ty.arguments.to_chalk(db);
+                chalk_ir::AliasTy::Projection(chalk_ir::ProjectionTy {
+                    associated_ty_id,
+                    substitution,
+                })
+                    .cast(&Interner)
+                    .intern(&Interner)
+            }
+            hir::Type::Placeholder(id) => {
+                // TODO probably wrong
+                let interned_id = db.intern_type_param_id(id);
+                PlaceholderIndex {
+                    ui: UniverseIndex::ROOT,
+                    idx: interned_id.as_intern_id().as_usize(),
+                }
+                .to_ty::<Interner>(&Interner)
+            }
+            // Ty::Bound(idx) => chalk_ir::TyKind::BoundVar(idx).intern(&Interner),
+            hir::Type::Dyn(predicates) => {
+                let self_ty = chalk_ir::BoundVar::new(DebruijnIndex::ONE, 0).to_ty(&Interner);
+                let where_clauses = chalk_ir::QuantifiedWhereClauses::from_iter(
+                    &Interner,
+                    predicates.iter().filter(|p| !p.is_error()).cloned().flat_map(|p| {
+                        let inline_bound = p.to_chalk(db);
+                        inline_bound.into_where_clauses(&Interner, self_ty.clone())
+                    }),
+                );
+                let bounded_ty = chalk_ir::DynTy {
+                    bounds: make_binders(where_clauses, 1),
+                    lifetime: LifetimeData::Static.intern(&Interner),
+                };
+                chalk_ir::TyKind::Dyn(bounded_ty).intern(&Interner)
+            }
+            hir::Type::Opaque(opaque_ty) => {
+                let opaque_ty_id = opaque_ty.opaque_ty_id.to_chalk(db);
+                let substitution = opaque_ty.arguments.to_chalk(db);
+                chalk_ir::TyKind::Alias(chalk_ir::AliasTy::Opaque(chalk_ir::OpaqueTy {
+                    opaque_ty_id,
+                    substitution,
+                }))
+                    .intern(&Interner)
+            }
+            hir::Type::Infer |
+            hir::Type::Error => chalk_ir::TyKind::Error.intern(&Interner),
+        }
+    }
+    fn from_chalk(_db: &dyn HirDatabase, _chalk: chalk_ir::Ty<Interner>) -> Self {
+        unimplemented!()
+    }
+}
+
+impl ToChalk for hir::TypeArgs {
+    type Chalk = chalk_ir::Substitution<Interner>;
+
+    fn to_chalk(self, db: &dyn HirDatabase) -> chalk_ir::Substitution<Interner> {
+        chalk_ir::Substitution::from_iter(&Interner, self.iter().map(|ty| ty.clone().to_chalk(db)))
+    }
+
+    fn from_chalk(_db: &dyn HirDatabase, _parameters: chalk_ir::Substitution<Interner>) -> Self {
+        unimplemented!()
+    }
+}
+
+impl ToChalk for hir::Bound {
+    type Chalk = rust_ir::QuantifiedInlineBound<Interner>;
+
+    fn to_chalk(self, db: &dyn HirDatabase) -> rust_ir::QuantifiedInlineBound<Interner> {
+        match self {
+            Bound::Trait(trait_bound) => {
+                let trait_id = trait_bound.trait_.to_chalk(db);
+                let args_no_self = trait_bound.arguments.to_chalk(db).as_slice(&Interner).to_vec();
+                make_binders(rust_ir::InlineBound::TraitBound(rust_ir::TraitBound {
+                    trait_id,
+                    args_no_self,
+                }), 0)
+            }
+            Bound::AssocTypeBinding(assoc_type_binding) => {
+                let trait_ = match assoc_type_binding.associated_ty.lookup(db.upcast()).container {
+                    AssocContainerId::TraitId(t) => t,
+                    _ => panic!("associated type not in trait"),
+                };
+                let trait_id = trait_.to_chalk(db);
+                let args_no_self = assoc_type_binding.arguments.to_chalk(db).as_slice(&Interner).to_vec();
+                let trait_bound = rust_ir::TraitBound {
+                    trait_id,
+                    args_no_self,
+                };
+                let associated_ty_id = TypeAliasAsAssocType(assoc_type_binding.associated_ty).to_chalk(db);
+                let parameters = Vec::new(); // FIXME we don't support generic associated types yet
+                let value = assoc_type_binding.ty.to_chalk(db);
+                make_binders(rust_ir::InlineBound::AliasEqBound(rust_ir::AliasEqBound {
+                    trait_bound,
+                    associated_ty_id,
+                    parameters,
+                    value,
+                }), 0)
+            }
+            Bound::Error => unimplemented!()
+        }
+    }
+
+    fn from_chalk(_db: &dyn HirDatabase, _parameters: Self::Chalk) -> Self {
+        unimplemented!()
+    }
+}
+
 pub(super) fn make_binders<T>(value: T, num_vars: usize) -> chalk_ir::Binders<T>
 where
     T: HasInterner<Interner = Interner>,
@@ -754,51 +938,4 @@ pub(super) fn convert_where_clauses(
         result.push(pred.clone().subst(substs).to_chalk(db));
     }
     result
-}
-
-pub(super) fn generic_predicate_to_inline_bound(
-    db: &dyn HirDatabase,
-    pred: &GenericPredicate,
-    self_ty: &Ty,
-) -> Option<rust_ir::InlineBound<Interner>> {
-    // An InlineBound is like a GenericPredicate, except the self type is left out.
-    // We don't have a special type for this, but Chalk does.
-    match pred {
-        GenericPredicate::Implemented(trait_ref) => {
-            if &trait_ref.substs[0] != self_ty {
-                // we can only convert predicates back to type bounds if they
-                // have the expected self type
-                return None;
-            }
-            let args_no_self = trait_ref.substs[1..]
-                .iter()
-                .map(|ty| ty.clone().to_chalk(db).cast(&Interner))
-                .collect();
-            let trait_bound =
-                rust_ir::TraitBound { trait_id: trait_ref.trait_.to_chalk(db), args_no_self };
-            Some(rust_ir::InlineBound::TraitBound(trait_bound))
-        }
-        GenericPredicate::Projection(proj) => {
-            if &proj.projection_ty.parameters[0] != self_ty {
-                return None;
-            }
-            let trait_ = match proj.projection_ty.associated_ty.lookup(db.upcast()).container {
-                AssocContainerId::TraitId(t) => t,
-                _ => panic!("associated type not in trait"),
-            };
-            let args_no_self = proj.projection_ty.parameters[1..]
-                .iter()
-                .map(|ty| ty.clone().to_chalk(db).cast(&Interner))
-                .collect();
-            let alias_eq_bound = rust_ir::AliasEqBound {
-                value: proj.ty.clone().to_chalk(db),
-                trait_bound: rust_ir::TraitBound { trait_id: trait_.to_chalk(db), args_no_self },
-                associated_ty_id: TypeAliasAsAssocType(proj.projection_ty.associated_ty)
-                    .to_chalk(db),
-                parameters: Vec::new(), // FIXME we don't support generic associated types yet
-            };
-            Some(rust_ir::InlineBound::AliasEqBound(alias_eq_bound))
-        }
-        GenericPredicate::Error => None,
-    }
 }

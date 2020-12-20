@@ -222,6 +222,12 @@ impl FromIterator<Type> for TypeArgs {
     }
 }
 
+impl Bound {
+    pub fn is_error(&self) -> bool {
+        matches!(self, Bound::Error)
+    }
+}
+
 pub(crate) trait HirTypeWalk {
     fn walk(&self, f: &mut impl FnMut(&Type));
     fn walk_mut(&mut self, f: &mut impl FnMut(&mut Type));
