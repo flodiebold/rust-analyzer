@@ -696,8 +696,15 @@ pub(crate) fn type_alias_type_query(db: &dyn HirDatabase, t: TypeAliasId) -> Typ
     let generics = generics(db.upcast(), t.into());
     let resolver = t.resolver(db.upcast());
     let ctx = Context::new(db, &resolver);
-    let type_ref = &db.type_alias_data(t).type_ref;
-    ctx.lower_type(type_ref.as_ref().unwrap_or(&TypeRef::Error))
+    let data = db.type_alias_data(t);
+
+    if data.is_extern {
+        let args = TypeArgs::type_params_for_generics(&generics);
+        Type::apply(TypeName::ForeignType(t), args)
+    } else {
+        let type_ref = &data.type_ref;
+        ctx.lower_type(type_ref.as_ref().unwrap_or(&TypeRef::Error))
+    }
 }
 pub(crate) fn type_alias_type_recover(
     db: &dyn HirDatabase,

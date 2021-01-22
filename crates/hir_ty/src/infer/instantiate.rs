@@ -132,5 +132,6 @@ fn instantiate_ctor(name: TypeName) -> TypeCtor {
         TypeName::FnPtr { num_args, is_varargs } => TypeCtor::FnPtr { num_args, is_varargs },
         TypeName::Never => TypeCtor::Never,
         TypeName::Tuple { cardinality } => TypeCtor::Tuple { cardinality },
+        TypeName::ForeignType(t) => TypeCtor::ForeignType(t),
     }
 }

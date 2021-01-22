@@ -761,11 +761,11 @@ impl ToChalk for hir::Type {
                     .intern(&Interner)
                 }
 
-                // hir::TypeName::ForeignType(type_alias) => {
-                //     let foreign_type = TypeAliasAsForeignType(type_alias);
-                //     let foreign_type_id = foreign_type.to_chalk(db);
-                //     chalk_ir::TyKind::Foreign(foreign_type_id).intern(&Interner)
-                // }
+                hir::TypeName::ForeignType(type_alias) => {
+                    let foreign_type = TypeAliasAsForeignType(type_alias);
+                    let foreign_type_id = foreign_type.to_chalk(db);
+                    chalk_ir::TyKind::Foreign(foreign_type_id).intern(&Interner)
+                }
                 hir::TypeName::Bool => chalk_ir::TyKind::Scalar(Scalar::Bool).intern(&Interner),
                 hir::TypeName::Char => chalk_ir::TyKind::Scalar(Scalar::Char).intern(&Interner),
                 hir::TypeName::Int(int_ty) => {

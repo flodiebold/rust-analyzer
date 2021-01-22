@@ -65,6 +65,9 @@ pub enum TypeName {
 
     /// A tuple type.  For example, `(i32, bool)`.
     Tuple { cardinality: u16 },
+
+    /// Represents a foreign type declared in external blocks.
+    ForeignType(TypeAliasId),
 }
 
 /// A resolved type reference, as could be written somewhere in Rust code.
