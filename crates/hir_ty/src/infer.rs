@@ -297,7 +297,7 @@ impl<'a> InferenceContext<'a> {
         // FIXME use right resolver for block
         let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
         let typ = ctx.lower_type(type_ref);
-        let ty = self.instantiate_type(&typ);
+        let ty = self.instantiate_ctx().instantiate_type(&typ);
         ty
     }
 
@@ -538,11 +538,11 @@ impl<'a> InferenceContext<'a> {
         let body = Arc::clone(&self.body); // avoid borrow checker problem
         let sig = self.db.function_signature(f);
         for (typ, pat) in sig.params().into_iter().zip(body.params.iter()) {
-            let ty = self.instantiate_type(typ);
+            let ty = self.instantiate_ctx().instantiate_type(typ);
 
             self.infer_pat(*pat, &ty, BindingMode::default());
         }
-        let return_ty = self.instantiate_type(sig.ret()); // FIXME implement RPIT
+        let return_ty = self.instantiate_ctx().instantiate_type(sig.ret()); // FIXME implement RPIT
         self.return_ty = return_ty;
     }
 

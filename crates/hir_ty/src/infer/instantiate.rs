@@ -8,7 +8,17 @@ use crate::{
 use super::InferenceContext;
 use chalk_ir::{BoundVar, DebruijnIndex};
 
+pub(super) struct InstantiateContext<'a, 'b> {
+    inf_ctx: &'b mut InferenceContext<'a>,
+}
+
 impl<'a> InferenceContext<'a> {
+    pub(super) fn instantiate_ctx(&mut self) -> InstantiateContext<'a, '_> {
+        InstantiateContext { inf_ctx: self }
+    }
+}
+
+impl<'a, 'b> InstantiateContext<'a, 'b> {
     pub(super) fn instantiate_type(&mut self, typ: &Type) -> Ty {
         match typ {
             Type::Apply(apply_ty) => Ty::Apply(ApplicationTy {
@@ -18,7 +28,8 @@ impl<'a> InferenceContext<'a> {
             Type::Projection(proj_ty) => {
                 debug_assert!(
                     {
-                        let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
+                        let generics =
+                            generics(self.inf_ctx.db.upcast(), proj_ty.associated_ty.into());
                         generics.len() == proj_ty.arguments.len()
                     },
                     "proj_ty: {:?}",
@@ -28,7 +39,7 @@ impl<'a> InferenceContext<'a> {
                     associated_ty: proj_ty.associated_ty,
                     parameters: self.instantiate_args(&proj_ty.arguments),
                 };
-                self.normalize_projection_ty(projection_ty)
+                self.inf_ctx.normalize_projection_ty(projection_ty)
             }
             Type::Opaque(opaque_ty) => Ty::Opaque(OpaqueTy {
                 opaque_ty_id: opaque_ty.opaque_ty_id,
@@ -39,7 +50,7 @@ impl<'a> InferenceContext<'a> {
                 let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
                 Ty::Dyn(bounds.iter().map(|b| self.instantiate_bound(b, self_ty.clone())).collect())
             }
-            Type::Infer => self.table.new_type_var(),
+            Type::Infer => self.inf_ctx.table.new_type_var(),
             Type::Error => Ty::Unknown,
         }
     }
@@ -57,7 +68,7 @@ impl<'a> InferenceContext<'a> {
     }
 
     fn instantiate_trait_bound(&mut self, trait_bound: &TraitBound, self_ty: Ty) -> TraitRef {
-        let substs = Substs::build_for_def(self.db, trait_bound.trait_)
+        let substs = Substs::build_for_def(self.inf_ctx.db, trait_bound.trait_)
             .push(self_ty)
             .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
@@ -69,7 +80,7 @@ impl<'a> InferenceContext<'a> {
         assoc_type_binding: &AssocTypeBinding,
         self_ty: Ty,
     ) -> ProjectionPredicate {
-        let substs = Substs::build_for_def(self.db, assoc_type_binding.associated_ty)
+        let substs = Substs::build_for_def(self.inf_ctx.db, assoc_type_binding.associated_ty)
             .push(self_ty)
             .fill_exact(assoc_type_binding.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
