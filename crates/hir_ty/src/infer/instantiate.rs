@@ -10,15 +10,30 @@ use chalk_ir::{BoundVar, DebruijnIndex};
 
 pub(super) struct InstantiateContext<'a, 'b> {
     inf_ctx: &'b mut InferenceContext<'a>,
+    impl_trait_mode: ImplTraitInstantiationMode,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ImplTraitInstantiationMode {
+    /// `impl Trait` gets instantiated as an opaque type. Used for return position
+    /// impl Trait outside the function.
+    Opaque,
+    /// `impl Trait` gets lowered into a type variable and obligations. Used for
+    /// return position impl trait inside the function.
+    Variable,
 }
 
 impl<'a> InferenceContext<'a> {
     pub(super) fn instantiate_ctx(&mut self) -> InstantiateContext<'a, '_> {
-        InstantiateContext { inf_ctx: self }
+        InstantiateContext { inf_ctx: self, impl_trait_mode: ImplTraitInstantiationMode::Opaque }
     }
 }
 
 impl<'a, 'b> InstantiateContext<'a, 'b> {
+    pub(super) fn with_impl_trait_as_variables(self) -> Self {
+        InstantiateContext { impl_trait_mode: ImplTraitInstantiationMode::Variable, ..self }
+    }
+
     pub(super) fn instantiate_type(&mut self, typ: &Type) -> Ty {
         match typ {
             Type::Apply(apply_ty) => Ty::Apply(ApplicationTy {
@@ -41,10 +56,17 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
                 };
                 self.inf_ctx.normalize_projection_ty(projection_ty)
             }
-            Type::Opaque(opaque_ty) => Ty::Opaque(OpaqueTy {
-                opaque_ty_id: opaque_ty.opaque_ty_id,
-                parameters: self.instantiate_args(&opaque_ty.arguments),
-            }),
+            Type::Opaque(opaque_ty) => match self.impl_trait_mode {
+                ImplTraitInstantiationMode::Opaque => Ty::Opaque(OpaqueTy {
+                    opaque_ty_id: opaque_ty.opaque_ty_id,
+                    parameters: self.instantiate_args(&opaque_ty.arguments),
+                }),
+                ImplTraitInstantiationMode::Variable => {
+                    let var = self.inf_ctx.table.new_type_var();
+                    // TODO obligations
+                    var
+                }
+            },
             Type::Placeholder(param_id) => Ty::Placeholder(*param_id),
             Type::Dyn(bounds) => {
                 let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));

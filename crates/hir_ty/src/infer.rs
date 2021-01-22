@@ -542,7 +542,8 @@ impl<'a> InferenceContext<'a> {
 
             self.infer_pat(*pat, &ty, BindingMode::default());
         }
-        let return_ty = self.instantiate_ctx().instantiate_type(sig.ret()); // FIXME implement RPIT
+        let return_ty =
+            self.instantiate_ctx().with_impl_trait_as_variables().instantiate_type(sig.ret());
         self.return_ty = return_ty;
     }
 
