@@ -740,12 +740,12 @@ impl ToChalk for hir::Type {
                     let arg = apply_ty.arguments[0].clone().to_chalk(db);
                     let lifetime = LifetimeData::Static.intern(&Interner);
                     chalk_ir::TyKind::Ref(m.to_chalk(db), lifetime, arg).intern(&Interner)
-                },
+                }
                 hir::TypeName::Array => {
                     let arg = apply_ty.arguments[0].clone().to_chalk(db);
                     let const_ = make_const_usize();
                     chalk_ir::TyKind::Array(arg, const_).intern(&Interner)
-                },
+                }
                 hir::TypeName::FnPtr { num_args: _, is_varargs } => {
                     let substitution =
                         chalk_ir::FnSubst(apply_ty.arguments.to_chalk(db).shifted_in(&Interner));
@@ -758,7 +758,7 @@ impl ToChalk for hir::Type {
                         },
                         substitution,
                     })
-                        .intern(&Interner)
+                    .intern(&Interner)
                 }
 
                 // hir::TypeName::ForeignType(type_alias) => {
@@ -766,7 +766,6 @@ impl ToChalk for hir::Type {
                 //     let foreign_type_id = foreign_type.to_chalk(db);
                 //     chalk_ir::TyKind::Foreign(foreign_type_id).intern(&Interner)
                 // }
-
                 hir::TypeName::Bool => chalk_ir::TyKind::Scalar(Scalar::Bool).intern(&Interner),
                 hir::TypeName::Char => chalk_ir::TyKind::Scalar(Scalar::Char).intern(&Interner),
                 hir::TypeName::Int(int_ty) => {
@@ -808,8 +807,8 @@ impl ToChalk for hir::Type {
                     associated_ty_id,
                     substitution,
                 })
-                    .cast(&Interner)
-                    .intern(&Interner)
+                .cast(&Interner)
+                .intern(&Interner)
             }
             hir::Type::Placeholder(id) => {
                 // TODO probably wrong
@@ -843,10 +842,9 @@ impl ToChalk for hir::Type {
                     opaque_ty_id,
                     substitution,
                 }))
-                    .intern(&Interner)
+                .intern(&Interner)
             }
-            hir::Type::Infer |
-            hir::Type::Error => chalk_ir::TyKind::Error.intern(&Interner),
+            hir::Type::Infer | hir::Type::Error => chalk_ir::TyKind::Error.intern(&Interner),
         }
     }
     fn from_chalk(_db: &dyn HirDatabase, _chalk: chalk_ir::Ty<Interner>) -> Self {
@@ -874,10 +872,13 @@ impl ToChalk for hir::Bound {
             Bound::Trait(trait_bound) => {
                 let trait_id = trait_bound.trait_.to_chalk(db);
                 let args_no_self = trait_bound.arguments.to_chalk(db).as_slice(&Interner).to_vec();
-                make_binders(rust_ir::InlineBound::TraitBound(rust_ir::TraitBound {
-                    trait_id,
-                    args_no_self,
-                }), 0)
+                make_binders(
+                    rust_ir::InlineBound::TraitBound(rust_ir::TraitBound {
+                        trait_id,
+                        args_no_self,
+                    }),
+                    0,
+                )
             }
             Bound::AssocTypeBinding(assoc_type_binding) => {
                 let trait_ = match assoc_type_binding.associated_ty.lookup(db.upcast()).container {
@@ -885,22 +886,24 @@ impl ToChalk for hir::Bound {
                     _ => panic!("associated type not in trait"),
                 };
                 let trait_id = trait_.to_chalk(db);
-                let args_no_self = assoc_type_binding.arguments.to_chalk(db).as_slice(&Interner).to_vec();
-                let trait_bound = rust_ir::TraitBound {
-                    trait_id,
-                    args_no_self,
-                };
-                let associated_ty_id = TypeAliasAsAssocType(assoc_type_binding.associated_ty).to_chalk(db);
+                let args_no_self =
+                    assoc_type_binding.arguments.to_chalk(db).as_slice(&Interner).to_vec();
+                let trait_bound = rust_ir::TraitBound { trait_id, args_no_self };
+                let associated_ty_id =
+                    TypeAliasAsAssocType(assoc_type_binding.associated_ty).to_chalk(db);
                 let parameters = Vec::new(); // FIXME we don't support generic associated types yet
                 let value = assoc_type_binding.ty.to_chalk(db);
-                make_binders(rust_ir::InlineBound::AliasEqBound(rust_ir::AliasEqBound {
-                    trait_bound,
-                    associated_ty_id,
-                    parameters,
-                    value,
-                }), 0)
+                make_binders(
+                    rust_ir::InlineBound::AliasEqBound(rust_ir::AliasEqBound {
+                        trait_bound,
+                        associated_ty_id,
+                        parameters,
+                        value,
+                    }),
+                    0,
+                )
             }
-            Bound::Error => unimplemented!()
+            Bound::Error => unimplemented!(),
         }
     }
 

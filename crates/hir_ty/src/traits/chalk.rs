@@ -14,11 +14,16 @@ use hir_def::{
 use hir_expand::name::name;
 
 use super::ChalkContext;
-use crate::{BoundVar, CallableDefId, DebruijnIndex, FnSig, GenericPredicate, ProjectionPredicate, ProjectionTy, Substs, TraitRef, Ty, TypeCtor, db::HirDatabase, display::HirDisplay, hir::Bound, method_resolution::{TyFingerprint, ALL_FLOAT_FPS, ALL_INT_FPS}, utils::generics};
-use mapping::{
-    convert_where_clauses, make_binders, TypeAliasAsAssocType,
-    TypeAliasAsValue,
+use crate::{
+    db::HirDatabase,
+    display::HirDisplay,
+    hir::Bound,
+    method_resolution::{TyFingerprint, ALL_FLOAT_FPS, ALL_INT_FPS},
+    utils::generics,
+    BoundVar, CallableDefId, DebruijnIndex, FnSig, GenericPredicate, ProjectionPredicate,
+    ProjectionTy, Substs, TraitRef, Ty, TypeCtor,
 };
+use mapping::{convert_where_clauses, make_binders, TypeAliasAsAssocType, TypeAliasAsValue};
 
 pub(crate) use self::interner::*;
 
@@ -385,7 +390,9 @@ pub(crate) fn associated_ty_data_query(
     let bound_vars = Substs::bound_vars(&generic_params, DebruijnIndex::INNERMOST);
     let resolver = hir_def::resolver::HasResolver::resolver(type_alias, db.upcast());
     let ctx = crate::hir::lower::Context::new(db, &resolver);
-    let bounds = type_alias_data.bounds.iter()
+    let bounds = type_alias_data
+        .bounds
+        .iter()
         .flat_map(|bound| ctx.lower_bound(bound))
         .filter(|bound| !bound.is_error())
         .map(|bound| bound.to_chalk(db))

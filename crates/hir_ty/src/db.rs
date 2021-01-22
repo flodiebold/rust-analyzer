@@ -5,7 +5,7 @@ use std::sync::Arc;
 use base_db::{impl_intern_key, salsa, CrateId, Upcast};
 use hir_def::{
     db::DefDatabase, expr::ExprId, ConstParamId, DefWithBodyId, FunctionId, GenericDefId, ImplId,
-    TypeAliasId, LocalFieldId, TypeParamId, VariantId,
+    LocalFieldId, TypeAliasId, TypeParamId, VariantId,
 };
 use la_arena::ArenaMap;
 
