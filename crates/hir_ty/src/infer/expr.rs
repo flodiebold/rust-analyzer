@@ -18,8 +18,8 @@ use crate::{
     autoderef, method_resolution, op,
     traits::{FnTrait, InEnvironment},
     utils::{generics, variant_data, Generics},
-    ApplicationTy, Binders, CallableDefId, InferTy, IntTy, Mutability, Obligation, OpaqueTyId,
-    Rawness, Substs, TraitRef, Ty, TypeCtor,
+    ApplicationTy, CallableDefId, InferTy, IntTy, Mutability, Obligation, OpaqueTyId, Rawness,
+    Substs, TraitRef, Ty, TypeCtor,
 };
 
 use super::{
@@ -799,17 +799,21 @@ impl<'a> InferenceContext<'a> {
                 method_name,
             )
         });
-        let (derefed_receiver_ty, method_ty, def_generics) = match resolved {
+        let (derefed_receiver_ty, method_ty) = match resolved {
             Some((ty, func)) => {
                 let ty = canonicalized_receiver.decanonicalize_ty(ty);
                 self.write_method_resolution(tgt_expr, func);
-                (ty, self.db.value_ty(func.into()), Some(generics(self.db.upcast(), func.into())))
+                let generics = generics(self.db.upcast(), func.into());
+                let substs = self.substs_for_method_call(Some(generics), generic_args, &ty);
+                let method_ty =
+                    self.insert_type_vars(Ty::apply(TypeCtor::FnDef(func.into()), substs));
+                (ty, method_ty)
             }
-            None => (receiver_ty, Binders::new(0, Ty::Unknown), None),
+            None => {
+                // FIXME record error
+                (receiver_ty, Ty::Unknown)
+            }
         };
-        let substs = self.substs_for_method_call(def_generics, generic_args, &derefed_receiver_ty);
-        let method_ty = method_ty.subst(&substs);
-        let method_ty = self.insert_type_vars(method_ty);
         self.register_obligations_for_call(&method_ty);
         let (expected_receiver_ty, param_tys, ret_ty) = match method_ty.callable_sig(self.db) {
             Some(sig) => {

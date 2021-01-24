@@ -172,7 +172,6 @@ impl RootDatabase {
             // HirDatabase
             hir::db::InferQueryQuery
             hir::db::TyQuery
-            hir::db::ValueTyQuery
             hir::db::ImplSelfTyQuery
             hir::db::ImplTraitQuery
             hir::db::FieldTypesQuery

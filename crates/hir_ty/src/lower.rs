@@ -9,7 +9,6 @@ use std::{iter, sync::Arc};
 
 use base_db::CrateId;
 use hir_def::{
-    adt::StructKind,
     builtin_type::BuiltinType,
     generics::{TypeParamProvenance, WherePredicate, WherePredicateTypeTarget},
     path::{GenericArg, Path, PathSegment, PathSegments},
@@ -1020,34 +1019,6 @@ fn fn_sig_for_fn(db: &dyn HirDatabase, def: FunctionId) -> PolyFnSig {
     Binders::new(num_binders, FnSig::from_params_and_return(params, ret, data.is_varargs))
 }
 
-/// Build the declared type of a function. This should not need to look at the
-/// function body.
-fn type_for_fn(db: &dyn HirDatabase, def: FunctionId) -> Binders<Ty> {
-    let generics = generics(db.upcast(), def.into());
-    let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
-    Binders::new(substs.len(), Ty::apply(TypeCtor::FnDef(def.into()), substs))
-}
-
-/// Build the declared type of a const.
-fn type_for_const(db: &dyn HirDatabase, def: ConstId) -> Binders<Ty> {
-    let data = db.const_data(def);
-    let generics = generics(db.upcast(), def.into());
-    let resolver = def.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-
-    Binders::new(generics.len(), Ty::from_hir(&ctx, &data.type_ref))
-}
-
-/// Build the declared type of a static.
-fn type_for_static(db: &dyn HirDatabase, def: StaticId) -> Binders<Ty> {
-    let data = db.static_data(def);
-    let resolver = def.resolver(db.upcast());
-    let ctx = TyLoweringContext::new(db, &resolver);
-
-    Binders::new(0, Ty::from_hir(&ctx, &data.type_ref))
-}
-
 fn fn_sig_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> PolyFnSig {
     let struct_data = db.struct_data(def);
     let fields = struct_data.variant_data.fields();
@@ -1058,17 +1029,6 @@ fn fn_sig_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> PolyFnS
         fields.iter().map(|(_, field)| Ty::from_hir(&ctx, &field.type_ref)).collect::<Vec<_>>();
     let ret = type_for_adt(db, def.into());
     Binders::new(ret.num_binders, FnSig::from_params_and_return(params, ret.value, false))
-}
-
-/// Build the type of a tuple struct constructor.
-fn type_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> Binders<Ty> {
-    let struct_data = db.struct_data(def);
-    if let StructKind::Unit = struct_data.variant_data.kind() {
-        return type_for_adt(db, def.into());
-    }
-    let generics = generics(db.upcast(), def.into());
-    let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
-    Binders::new(substs.len(), Ty::apply(TypeCtor::FnDef(def.into()), substs))
 }
 
 fn fn_sig_for_enum_variant_constructor(db: &dyn HirDatabase, def: EnumVariantId) -> PolyFnSig {
@@ -1082,18 +1042,6 @@ fn fn_sig_for_enum_variant_constructor(db: &dyn HirDatabase, def: EnumVariantId)
         fields.iter().map(|(_, field)| Ty::from_hir(&ctx, &field.type_ref)).collect::<Vec<_>>();
     let ret = type_for_adt(db, def.parent.into());
     Binders::new(ret.num_binders, FnSig::from_params_and_return(params, ret.value, false))
-}
-
-/// Build the type of a tuple enum variant constructor.
-fn type_for_enum_variant_constructor(db: &dyn HirDatabase, def: EnumVariantId) -> Binders<Ty> {
-    let enum_data = db.enum_data(def.parent);
-    let var_data = &enum_data.variants[def.local_id].variant_data;
-    if let StructKind::Unit = var_data.kind() {
-        return type_for_adt(db, def.parent.into());
-    }
-    let generics = generics(db.upcast(), def.parent.into());
-    let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
-    Binders::new(substs.len(), Ty::apply(TypeCtor::FnDef(def.into()), substs))
 }
 
 fn type_for_adt(db: &dyn HirDatabase, adt: AdtId) -> Binders<Ty> {
@@ -1185,17 +1133,6 @@ pub(crate) fn ty_recover(db: &dyn HirDatabase, _cycle: &[String], def: &TyDefId)
         TyDefId::TypeAliasId(it) => generics(db.upcast(), it.into()).len(),
     };
     Binders::new(num_binders, Ty::Unknown)
-}
-
-pub(crate) fn value_ty_query(db: &dyn HirDatabase, def: ValueTyDefId) -> Binders<Ty> {
-    match def {
-        ValueTyDefId::FunctionId(it) => type_for_fn(db, it),
-        ValueTyDefId::StructId(it) => type_for_struct_constructor(db, it),
-        ValueTyDefId::UnionId(it) => type_for_adt(db, it.into()),
-        ValueTyDefId::EnumVariantId(it) => type_for_enum_variant_constructor(db, it),
-        ValueTyDefId::ConstId(it) => type_for_const(db, it),
-        ValueTyDefId::StaticId(it) => type_for_static(db, it),
-    }
 }
 
 pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Binders<Ty> {

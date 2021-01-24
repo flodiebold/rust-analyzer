@@ -17,7 +17,8 @@ use hir_def::{
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AssocItemId, FunctionId, GenericDefId, ImplId, TraitId, TypeAliasId, TypeParamId,
+    AssocItemId, ConstId, FunctionId, GenericDefId, ImplId, StaticId, TraitId, TypeAliasId,
+    TypeParamId,
 };
 
 use super::FnSig;
@@ -815,4 +816,20 @@ pub(crate) fn function_signature_query(db: &dyn HirDatabase, f: FunctionId) -> F
     let ctx_ret = ctx_param.with_impl_trait_mode(ImplTraitLoweringMode::Opaque);
     let ret = ctx_ret.lower_type(&data.ret_type);
     FnSig::from_params_and_return(params, ret, data.is_varargs)
+}
+
+/// Build the declared type of a const.
+pub(crate) fn const_type_query(db: &dyn HirDatabase, def: ConstId) -> Type {
+    let data = db.const_data(def);
+    let resolver = def.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver);
+    ctx.lower_type(&data.type_ref)
+}
+
+/// Build the declared type of a static.
+pub(crate) fn static_type_query(db: &dyn HirDatabase, def: StaticId) -> Type {
+    let data = db.static_data(def);
+    let resolver = def.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver);
+    ctx.lower_type(&data.type_ref)
 }

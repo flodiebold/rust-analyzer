@@ -82,7 +82,7 @@ impl<'a> InferenceContext<'a> {
                 let substs = Substs::type_params_for_generics(&generics);
                 let ty = self.db.impl_self_ty(impl_id).subst(&substs);
                 if let Some((AdtId::StructId(struct_id), substs)) = ty.as_adt() {
-                    let ty = self.db.value_ty(struct_id.into()).subst(&substs);
+                    let ty = self.instantiate_ty_for_struct_constructor(struct_id, substs.clone());
                     return Some(ty);
                 } else {
                     // FIXME: diagnostic, invalid Self reference
@@ -92,8 +92,6 @@ impl<'a> InferenceContext<'a> {
             ValueNs::GenericParam(it) => return Some(self.db.const_param_ty(it)),
         };
 
-        let ty = self.db.value_ty(typable);
-        // self_subst is just for the parent
         let parent_substs = self_subst.unwrap_or_else(Substs::empty);
         let ctx = crate::lower::TyLoweringContext::new(self.db, &self.resolver);
         let substs = Ty::substs_from_path(&ctx, path, typable, true);
@@ -101,7 +99,7 @@ impl<'a> InferenceContext<'a> {
             .use_parent_substs(&parent_substs)
             .fill(substs.0[parent_substs.len()..].iter().cloned())
             .build();
-        let ty = ty.subst(&full_substs);
+        let ty = self.instantiate_ty_for_value(typable, full_substs);
         Some(ty)
     }
 

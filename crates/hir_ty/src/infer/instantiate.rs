@@ -2,11 +2,13 @@ use crate::{
     hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName},
     utils::generics,
     ApplicationTy, GenericPredicate, OpaqueTy, ProjectionPredicate, ProjectionTy, Substs, TraitRef,
-    Ty, TypeCtor,
+    Ty, TypeCtor, ValueTyDefId,
 };
 
 use super::InferenceContext;
 use chalk_ir::{BoundVar, DebruijnIndex};
+use hir_def::{adt::StructKind, EnumVariantId, StructId};
+use stdx::never;
 
 pub(super) struct InstantiateContext<'a, 'b> {
     inf_ctx: &'b mut InferenceContext<'a>,
@@ -26,6 +28,52 @@ pub enum ImplTraitInstantiationMode {
 impl<'a> InferenceContext<'a> {
     pub(super) fn instantiate_ctx(&mut self) -> InstantiateContext<'a, '_> {
         InstantiateContext { inf_ctx: self, impl_trait_mode: ImplTraitInstantiationMode::Opaque }
+    }
+
+    pub(super) fn instantiate_ty_for_struct_constructor(
+        &mut self,
+        def: StructId,
+        substs: Substs,
+    ) -> Ty {
+        let struct_data = self.db.struct_data(def);
+        if let StructKind::Unit = struct_data.variant_data.kind() {
+            return Ty::apply(TypeCtor::Adt(def.into()), substs);
+        }
+        Ty::apply(TypeCtor::FnDef(def.into()), substs)
+    }
+
+    pub(super) fn instantiate_ty_for_value(&mut self, def: ValueTyDefId, substs: Substs) -> Ty {
+        match def {
+            ValueTyDefId::FunctionId(it) => Ty::apply(TypeCtor::FnDef(it.into()), substs),
+            ValueTyDefId::StructId(it) => self.instantiate_ty_for_struct_constructor(it, substs),
+            ValueTyDefId::UnionId(it) => Ty::apply(TypeCtor::Adt(it.into()), substs),
+            ValueTyDefId::EnumVariantId(it) => {
+                self.instantiate_ty_for_enum_variant_constructor(it, substs)
+            }
+            ValueTyDefId::ConstId(it) => {
+                // TODO type args?
+                let typ = self.db.const_type(it);
+                self.instantiate_ctx().instantiate_type(&typ)
+            }
+            ValueTyDefId::StaticId(it) => {
+                never!(!substs.is_empty());
+                let typ = self.db.static_type(it);
+                self.instantiate_ctx().instantiate_type(&typ)
+            }
+        }
+    }
+
+    fn instantiate_ty_for_enum_variant_constructor(
+        &mut self,
+        def: EnumVariantId,
+        substs: Substs,
+    ) -> Ty {
+        let enum_data = self.db.enum_data(def.parent);
+        let var_data = &enum_data.variants[def.local_id].variant_data;
+        if let StructKind::Unit = var_data.kind() {
+            return Ty::apply(TypeCtor::Adt(def.parent.into()), substs);
+        }
+        Ty::apply(TypeCtor::FnDef(def.into()), substs)
     }
 }
 

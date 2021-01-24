@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use base_db::{impl_intern_key, salsa, CrateId, Upcast};
 use hir_def::{
-    db::DefDatabase, expr::ExprId, ConstParamId, DefWithBodyId, FunctionId, GenericDefId, ImplId,
-    LocalFieldId, TypeAliasId, TypeParamId, VariantId,
+    db::DefDatabase, expr::ExprId, ConstId, ConstParamId, DefWithBodyId, FunctionId, GenericDefId,
+    ImplId, LocalFieldId, StaticId, TypeAliasId, TypeParamId, VariantId,
 };
 use la_arena::ArenaMap;
 
@@ -14,7 +14,7 @@ use crate::{
     method_resolution::{InherentImpls, TraitImpls},
     traits::chalk,
     Binders, CallableDefId, GenericPredicate, InferenceResult, OpaqueTyId, PolyFnSig,
-    ReturnTypeImplTraits, TraitRef, Ty, TyDefId, ValueTyDefId,
+    ReturnTypeImplTraits, TraitRef, Ty, TyDefId,
 };
 use hir_expand::name::Name;
 
@@ -35,9 +35,6 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::cycle(crate::hir::type_alias_type_recover)]
     fn type_alias_type(&self, def: TypeAliasId) -> Type;
 
-    #[salsa::invoke(crate::lower::value_ty_query)]
-    fn value_ty(&self, def: ValueTyDefId) -> Binders<Ty>;
-
     #[salsa::invoke(crate::lower::impl_self_ty_query)]
     #[salsa::cycle(crate::lower::impl_self_ty_recover)]
     fn impl_self_ty(&self, def: ImplId) -> Binders<Ty>;
@@ -46,8 +43,15 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::cycle(crate::hir::impl_self_ty_recover)]
     fn impl_self_ty_2(&self, def: ImplId) -> Type;
 
+    // TODO make this return Type
     #[salsa::invoke(crate::lower::const_param_ty_query)]
     fn const_param_ty(&self, def: ConstParamId) -> Ty;
+
+    #[salsa::invoke(crate::hir::const_type_query)]
+    fn const_type(&self, def: ConstId) -> Type;
+
+    #[salsa::invoke(crate::hir::static_type_query)]
+    fn static_type(&self, def: StaticId) -> Type;
 
     #[salsa::invoke(crate::lower::impl_trait_query)]
     fn impl_trait(&self, def: ImplId) -> Option<Binders<TraitRef>>;
