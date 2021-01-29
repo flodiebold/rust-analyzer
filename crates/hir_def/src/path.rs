@@ -161,6 +161,16 @@ pub enum GenericArg {
     Lifetime(LifetimeRef),
 }
 
+impl GenericArg {
+    pub fn is_type(&self) -> bool {
+        matches!(self, GenericArg::Type(_))
+    }
+
+    pub fn is_lifetime(&self) -> bool {
+        matches!(self, GenericArg::Lifetime(_))
+    }
+}
+
 impl Path {
     /// Converts an `ast::Path` to `Path`. Works with use trees.
     /// It correctly handles `$crate` based path from macro call.
