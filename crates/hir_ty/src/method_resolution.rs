@@ -19,6 +19,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::{
     autoderef,
     db::HirDatabase,
+    hir::Type,
     primitive::{FloatBitness, FloatTy, IntTy},
     utils::all_super_traits,
     ApplicationTy, Canonical, DebruijnIndex, InEnvironment, Substs, TraitEnvironment, TraitRef, Ty,
@@ -40,6 +41,18 @@ impl TyFingerprint {
         match ty {
             Ty::Apply(a_ty) => Some(TyFingerprint::Apply(a_ty.ctor)),
             Ty::Dyn(_) => ty.dyn_trait().map(|trait_| TyFingerprint::Dyn(trait_)),
+            _ => None,
+        }
+    }
+
+    /// Creates a TyFingerprint for looking up an impl. Only certain types can
+    /// have impls: if we have some `struct S`, we can have an `impl S`, but not
+    /// `impl &S`. Hence, this will return `None` for reference types and such.
+    pub(crate) fn for_impl_type(typ: &Type) -> Option<TyFingerprint> {
+        match typ {
+            Type::Apply(a_ty) => {
+                Some(TyFingerprint::Apply(crate::infer::instantiate_ctor(a_ty.name)))
+            }
             _ => None,
         }
     }
@@ -120,8 +133,8 @@ impl TraitImpls {
                     Some(tr) => tr.value.trait_,
                     None => continue,
                 };
-                let self_ty = db.impl_self_ty(impl_id);
-                let self_ty_fp = TyFingerprint::for_impl(&self_ty.value);
+                let self_ty = db.impl_self_ty_2(impl_id);
+                let self_ty_fp = TyFingerprint::for_impl_type(&self_ty);
                 impls
                     .map
                     .entry(target_trait)
@@ -207,8 +220,8 @@ impl InherentImpls {
                     continue;
                 }
 
-                let self_ty = db.impl_self_ty(impl_id);
-                if let Some(fp) = TyFingerprint::for_impl(&self_ty.value) {
+                let self_ty = db.impl_self_ty_2(impl_id);
+                if let Some(fp) = TyFingerprint::for_impl_type(&self_ty) {
                     map.entry(fp).or_default().push(impl_id);
                 }
             }

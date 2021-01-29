@@ -10,6 +10,7 @@ use chalk_ir::{BoundVar, DebruijnIndex};
 use hir_def::{adt::StructKind, EnumVariantId, StructId};
 use stdx::never;
 
+// TODO make it possible to apply a substitution to type parameters while instantiating; assert that no type parameters from outside are instantiated as placeholders
 pub(super) struct InstantiateContext<'a, 'b> {
     inf_ctx: &'b mut InferenceContext<'a>,
     impl_trait_mode: ImplTraitInstantiationMode,
@@ -165,7 +166,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
     }
 }
 
-fn instantiate_ctor(name: TypeName) -> TypeCtor {
+pub(crate) fn instantiate_ctor(name: TypeName) -> TypeCtor {
     match name {
         TypeName::Bool => TypeCtor::Bool,
         TypeName::Char => TypeCtor::Char,

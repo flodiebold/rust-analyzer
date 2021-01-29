@@ -78,9 +78,8 @@ impl<'a> InferenceContext<'a> {
                 it.into()
             }
             ValueNs::ImplSelf(impl_id) => {
-                let generics = crate::utils::generics(self.db.upcast(), impl_id.into());
-                let substs = Substs::type_params_for_generics(&generics);
-                let ty = self.db.impl_self_ty(impl_id).subst(&substs);
+                let typ = self.db.impl_self_ty_2(impl_id);
+                let ty = self.instantiate_ctx().instantiate_type(&typ);
                 if let Some((AdtId::StructId(struct_id), substs)) = ty.as_adt() {
                     let ty = self.instantiate_ty_for_struct_constructor(struct_id, substs.clone());
                     return Some(ty);

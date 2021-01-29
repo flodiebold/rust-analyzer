@@ -44,6 +44,7 @@ use crate::{
     db::HirDatabase, infer::diagnostics::InferenceDiagnostic, lower::ImplTraitLoweringMode,
 };
 
+pub(crate) use instantiate::instantiate_ctor;
 pub(crate) use unify::unify;
 
 macro_rules! ty_app {
@@ -453,9 +454,8 @@ impl<'a> InferenceContext<'a> {
                 forbid_unresolved_segments((ty, Some(var.into())), unresolved)
             }
             TypeNs::SelfType(impl_id) => {
-                let generics = crate::utils::generics(self.db.upcast(), impl_id.into());
-                let substs = Substs::type_params_for_generics(&generics);
-                let ty = self.db.impl_self_ty(impl_id).subst(&substs);
+                let typ = self.db.impl_self_ty_2(impl_id);
+                let ty = self.instantiate_ctx().instantiate_type(&typ);
                 match unresolved {
                     None => {
                         let variant = ty_variant(&ty);
