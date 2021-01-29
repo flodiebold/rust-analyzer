@@ -133,7 +133,7 @@ impl TraitImpls {
                     Some(tr) => tr.value.trait_,
                     None => continue,
                 };
-                let self_ty = db.impl_self_ty_2(impl_id);
+                let self_ty = db.impl_self_type(impl_id);
                 let self_ty_fp = TyFingerprint::for_impl_type(&self_ty);
                 impls
                     .map
@@ -220,7 +220,7 @@ impl InherentImpls {
                     continue;
                 }
 
-                let self_ty = db.impl_self_ty_2(impl_id);
+                let self_ty = db.impl_self_type(impl_id);
                 if let Some(fp) = TyFingerprint::for_impl_type(&self_ty) {
                     map.entry(fp).or_default().push(impl_id);
                 }

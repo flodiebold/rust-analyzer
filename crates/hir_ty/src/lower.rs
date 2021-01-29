@@ -1137,7 +1137,7 @@ pub(crate) fn ty_recover(db: &dyn HirDatabase, _cycle: &[String], def: &TyDefId)
 }
 
 pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Binders<Ty> {
-    let typ = db.impl_self_ty_2(impl_id);
+    let typ = db.impl_self_type(impl_id);
     instantiate_outside_inference(db, impl_id.into(), &typ)
 }
 

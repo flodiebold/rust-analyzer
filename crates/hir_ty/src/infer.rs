@@ -454,7 +454,7 @@ impl<'a> InferenceContext<'a> {
                 forbid_unresolved_segments((ty, Some(var.into())), unresolved)
             }
             TypeNs::SelfType(impl_id) => {
-                let typ = self.db.impl_self_ty_2(impl_id);
+                let typ = self.db.impl_self_type(impl_id);
                 let ty = self.instantiate_ctx_local().instantiate(&typ);
                 match unresolved {
                     None => {

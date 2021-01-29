@@ -381,7 +381,7 @@ impl FnSig {
 
 pub(crate) use lower::{
     const_type_query, function_signature_query, generic_bounds_for_param_query,
-    generic_bounds_for_param_recover, generic_defaults_query, impl_self_ty_query,
-    impl_self_ty_recover, impl_trait_query, static_type_query, type_alias_type_query,
+    generic_bounds_for_param_recover, generic_defaults_query, impl_self_type_query,
+    impl_self_type_recover, impl_trait_query, static_type_query, type_alias_type_query,
     type_alias_type_recover,
 };

@@ -38,9 +38,9 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::invoke(crate::lower::impl_self_ty_query)]
     fn impl_self_ty(&self, def: ImplId) -> Binders<Ty>;
 
-    #[salsa::invoke(crate::hir::impl_self_ty_query)]
-    #[salsa::cycle(crate::hir::impl_self_ty_recover)]
-    fn impl_self_ty_2(&self, def: ImplId) -> Type;
+    #[salsa::invoke(crate::hir::impl_self_type_query)]
+    #[salsa::cycle(crate::hir::impl_self_type_recover)]
+    fn impl_self_type(&self, def: ImplId) -> Type;
 
     // TODO make this return Type
     #[salsa::invoke(crate::lower::const_param_ty_query)]

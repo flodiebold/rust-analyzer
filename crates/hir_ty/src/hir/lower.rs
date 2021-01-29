@@ -289,7 +289,7 @@ impl<'a> Context<'a> {
                 return (ty, None);
             }
             TypeNs::GenericParam(param_id) => Type::Placeholder(param_id),
-            TypeNs::SelfType(impl_id) => self.db.impl_self_ty_2(impl_id),
+            TypeNs::SelfType(impl_id) => self.db.impl_self_type(impl_id),
             TypeNs::AdtSelfType(adt) => {
                 let generics = generics(self.db.upcast(), adt.into());
                 let arguments = TypeArgs::type_params_for_generics(&generics);
@@ -718,14 +718,18 @@ pub(crate) fn type_alias_type_recover(
     Type::Error
 }
 
-pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Type {
+pub(crate) fn impl_self_type_query(db: &dyn HirDatabase, impl_id: ImplId) -> Type {
     let impl_data = db.impl_data(impl_id);
     let resolver = impl_id.resolver(db.upcast());
     let generics = generics(db.upcast(), impl_id.into());
     let ctx = Context::new(db, &resolver);
     ctx.lower_type(&impl_data.target_type)
 }
-pub(crate) fn impl_self_ty_recover(db: &dyn HirDatabase, _cycle: &[String], def: &ImplId) -> Type {
+pub(crate) fn impl_self_type_recover(
+    db: &dyn HirDatabase,
+    _cycle: &[String],
+    def: &ImplId,
+) -> Type {
     // FIXME report cycle error
     Type::Error
 }
