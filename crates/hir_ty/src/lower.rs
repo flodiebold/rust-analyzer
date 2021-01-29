@@ -26,6 +26,7 @@ use test_utils::mark;
 
 use crate::{
     db::HirDatabase,
+    infer::instantiate_outside_inference,
     utils::{
         all_super_trait_refs, associated_type_by_name_including_super_traits, generics,
         make_mut_slice, variant_data,
@@ -1136,12 +1137,8 @@ pub(crate) fn ty_recover(db: &dyn HirDatabase, _cycle: &[String], def: &TyDefId)
 }
 
 pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Binders<Ty> {
-    let impl_data = db.impl_data(impl_id);
-    let resolver = impl_id.resolver(db.upcast());
-    let generics = generics(db.upcast(), impl_id.into());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    Binders::new(generics.len(), Ty::from_hir(&ctx, &impl_data.target_type))
+    let typ = db.impl_self_ty_2(impl_id);
+    instantiate_outside_inference(db, impl_id.into(), &typ)
 }
 
 pub(crate) fn const_param_ty_query(db: &dyn HirDatabase, def: ConstParamId) -> Ty {
@@ -1151,15 +1148,6 @@ pub(crate) fn const_param_ty_query(db: &dyn HirDatabase, def: ConstParamId) -> T
     let ctx = TyLoweringContext::new(db, &resolver);
 
     Ty::from_hir(&ctx, &data.ty)
-}
-
-pub(crate) fn impl_self_ty_recover(
-    db: &dyn HirDatabase,
-    _cycle: &[String],
-    impl_id: &ImplId,
-) -> Binders<Ty> {
-    let generics = generics(db.upcast(), (*impl_id).into());
-    Binders::new(generics.len(), Ty::Unknown)
 }
 
 pub(crate) fn impl_trait_query(db: &dyn HirDatabase, impl_id: ImplId) -> Option<Binders<TraitRef>> {
