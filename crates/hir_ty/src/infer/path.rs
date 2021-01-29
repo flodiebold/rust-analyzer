@@ -79,7 +79,7 @@ impl<'a> InferenceContext<'a> {
             }
             ValueNs::ImplSelf(impl_id) => {
                 let typ = self.db.impl_self_ty_2(impl_id);
-                let ty = self.instantiate_ctx_local().instantiate_type(&typ);
+                let ty = self.instantiate_ctx_local().instantiate(&typ);
                 if let Some((AdtId::StructId(struct_id), substs)) = ty.as_adt() {
                     let ty = self.instantiate_ty_for_struct_constructor(struct_id, substs.clone());
                     return Some(ty);

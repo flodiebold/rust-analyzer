@@ -7,8 +7,8 @@ use crate::{
     db::HirDatabase,
     hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName},
     utils::generics,
-    ApplicationTy, GenericPredicate, Obligation, OpaqueTy, ProjectionPredicate, ProjectionTy,
-    Substs, TraitRef, Ty, TypeCtor, ValueTyDefId,
+    ApplicationTy, Binders, GenericPredicate, Obligation, OpaqueTy, ProjectionPredicate,
+    ProjectionTy, Substs, TraitRef, Ty, TypeCtor, TypeWalk, ValueTyDefId,
 };
 
 use super::InferenceContext;
@@ -27,6 +27,7 @@ pub(crate) struct InstantiateContext<'a, 'b> {
     inf_ctx: &'b mut (dyn InstantiateOps + 'a),
     impl_trait_mode: ImplTraitInstantiationMode,
     type_param_mode: TypeParamInstantiationMode,
+    shift: DebruijnIndex,
 }
 
 impl<'a> InstantiateOps for InferenceContext<'a> {
@@ -52,18 +53,6 @@ impl InstantiateOps for NoopInstantiateOps {
 }
 
 impl NoopInstantiateOps {
-    pub(crate) fn ctx_local<'a>(
-        &mut self,
-        db: &'a dyn HirDatabase,
-        def: GenericDefId,
-    ) -> InstantiateContext<'a, '_> {
-        InstantiateContext {
-            db,
-            inf_ctx: self,
-            impl_trait_mode: ImplTraitInstantiationMode::Variable,
-            type_param_mode: TypeParamInstantiationMode::Local(def),
-        }
-    }
     pub(crate) fn ctx_with_substs<'a>(
         &mut self,
         db: &'a dyn HirDatabase,
@@ -75,6 +64,7 @@ impl NoopInstantiateOps {
             inf_ctx: self,
             impl_trait_mode: ImplTraitInstantiationMode::Variable,
             type_param_mode: TypeParamInstantiationMode::Substitute(def, substs),
+            shift: DebruijnIndex::INNERMOST,
         }
     }
 }
@@ -112,6 +102,7 @@ impl<'a> InferenceContext<'a> {
             inf_ctx: self,
             impl_trait_mode: ImplTraitInstantiationMode::Opaque,
             type_param_mode: TypeParamInstantiationMode::Forbidden,
+            shift: DebruijnIndex::INNERMOST,
         }
     }
 
@@ -125,6 +116,7 @@ impl<'a> InferenceContext<'a> {
             inf_ctx: self,
             impl_trait_mode: ImplTraitInstantiationMode::Opaque,
             type_param_mode,
+            shift: DebruijnIndex::INNERMOST,
         }
     }
 
@@ -138,6 +130,7 @@ impl<'a> InferenceContext<'a> {
             inf_ctx: self,
             impl_trait_mode: ImplTraitInstantiationMode::Opaque,
             type_param_mode: TypeParamInstantiationMode::Substitute(def, substs),
+            shift: DebruijnIndex::INNERMOST,
         }
     }
 
@@ -163,12 +156,12 @@ impl<'a> InferenceContext<'a> {
             }
             ValueTyDefId::ConstId(it) => {
                 let typ = self.db.const_type(it);
-                self.instantiate_ctx_with_substs(it.into(), substs).instantiate_type(&typ)
+                self.instantiate_ctx_with_substs(it.into(), substs).instantiate(&typ)
             }
             ValueTyDefId::StaticId(it) => {
                 never!(!substs.is_empty());
                 let typ = self.db.static_type(it);
-                self.instantiate_ctx_no_substs().instantiate_type(&typ)
+                self.instantiate_ctx_no_substs().instantiate(&typ)
             }
         }
     }
@@ -187,74 +180,21 @@ impl<'a> InferenceContext<'a> {
     }
 }
 
+pub(crate) trait Instantiate {
+    type InstantiatedType;
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType;
+}
+
 impl<'a, 'b> InstantiateContext<'a, 'b> {
     pub(crate) fn with_impl_trait_as_variables(self) -> Self {
         InstantiateContext { impl_trait_mode: ImplTraitInstantiationMode::Variable, ..self }
     }
 
-    pub(crate) fn instantiate_type(&mut self, typ: &Type) -> Ty {
-        match typ {
-            Type::Apply(apply_ty) => Ty::Apply(ApplicationTy {
-                ctor: instantiate_ctor(apply_ty.name),
-                parameters: self.instantiate_args(&apply_ty.arguments),
-            }),
-            Type::Projection(proj_ty) => {
-                debug_assert!(
-                    {
-                        let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
-                        generics.len() == proj_ty.arguments.len()
-                    },
-                    "proj_ty: {:?}",
-                    proj_ty
-                );
-                let projection_ty = ProjectionTy {
-                    associated_ty: proj_ty.associated_ty,
-                    parameters: self.instantiate_args(&proj_ty.arguments),
-                };
-                self.normalize_projection_ty(projection_ty)
-            }
-            Type::Opaque(opaque_ty) => match self.impl_trait_mode {
-                ImplTraitInstantiationMode::Opaque => Ty::Opaque(OpaqueTy {
-                    opaque_ty_id: opaque_ty.opaque_ty_id,
-                    parameters: self.instantiate_args(&opaque_ty.arguments),
-                }),
-                ImplTraitInstantiationMode::Variable => {
-                    let var = self.inf_ctx.new_type_var();
-                    // TODO obligations
-                    var
-                }
-            },
-            Type::Placeholder(param_id) => match &self.type_param_mode {
-                TypeParamInstantiationMode::Forbidden => {
-                    never!(true);
-                    Ty::Unknown
-                }
-                TypeParamInstantiationMode::Local(def) => {
-                    let generics = generics(self.db.upcast(), *def);
-                    if never!(generics.param_idx(*param_id).is_none()) {
-                        Ty::Unknown
-                    } else {
-                        Ty::Placeholder(*param_id)
-                    }
-                }
-                TypeParamInstantiationMode::Substitute(def, substs) => {
-                    let generics = generics(self.db.upcast(), *def);
-                    let idx = if let Some(idx) = generics.param_idx(*param_id) {
-                        idx
-                    } else {
-                        never!(true);
-                        return Ty::Unknown;
-                    };
-                    substs[idx].clone()
-                }
-            },
-            Type::Dyn(bounds) => {
-                let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
-                Ty::Dyn(bounds.iter().map(|b| self.instantiate_bound(b, self_ty.clone())).collect())
-            }
-            Type::Infer => self.inf_ctx.new_type_var(),
-            Type::Error => Ty::Unknown,
-        }
+    pub fn instantiate<T: Instantiate>(&mut self, t: &T) -> T::InstantiatedType {
+        t.do_instantiate(self)
     }
 
     fn instantiate_bound(&mut self, bound: &Bound, self_ty: Ty) -> GenericPredicate {
@@ -272,7 +212,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
     fn instantiate_trait_bound(&mut self, trait_bound: &TraitBound, self_ty: Ty) -> TraitRef {
         let substs = Substs::build_for_def(self.db, trait_bound.trait_)
             .push(self_ty)
-            .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate_type(typ)))
+            .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate(typ)))
             .build();
         TraitRef { trait_: trait_bound.trait_, substs }
     }
@@ -284,16 +224,12 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
     ) -> ProjectionPredicate {
         let substs = Substs::build_for_def(self.db, assoc_type_binding.associated_ty)
             .push(self_ty)
-            .fill_exact(assoc_type_binding.arguments.iter().map(|typ| self.instantiate_type(typ)))
+            .fill_exact(assoc_type_binding.arguments.iter().map(|typ| self.instantiate(typ)))
             .build();
         let projection_ty =
             ProjectionTy { associated_ty: assoc_type_binding.associated_ty, parameters: substs };
-        let ty = self.instantiate_type(&assoc_type_binding.ty);
+        let ty = self.instantiate(&assoc_type_binding.ty);
         ProjectionPredicate { projection_ty, ty }
-    }
-
-    fn instantiate_args(&mut self, args: &TypeArgs) -> Substs {
-        Substs(args.iter().map(|typ| self.instantiate_type(typ)).collect())
     }
 
     fn normalize_projection_ty(&mut self, proj_ty: ProjectionTy) -> Ty {
@@ -302,6 +238,94 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
         let obligation = Obligation::Projection(predicate);
         self.inf_ctx.push_obligation(obligation);
         var
+    }
+}
+
+impl Instantiate for Type {
+    type InstantiatedType = Ty;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        match self {
+            Type::Apply(apply_ty) => Ty::Apply(ApplicationTy {
+                ctor: instantiate_ctor(apply_ty.name),
+                parameters: ctx.instantiate(&apply_ty.arguments),
+            }),
+            Type::Projection(proj_ty) => {
+                debug_assert!(
+                    {
+                        let generics = generics(ctx.db.upcast(), proj_ty.associated_ty.into());
+                        generics.len() == proj_ty.arguments.len()
+                    },
+                    "proj_ty: {:?}",
+                    proj_ty
+                );
+                let projection_ty = ProjectionTy {
+                    associated_ty: proj_ty.associated_ty,
+                    parameters: ctx.instantiate(&proj_ty.arguments),
+                };
+                ctx.normalize_projection_ty(projection_ty)
+            }
+            Type::Opaque(opaque_ty) => match ctx.impl_trait_mode {
+                ImplTraitInstantiationMode::Opaque => Ty::Opaque(OpaqueTy {
+                    opaque_ty_id: opaque_ty.opaque_ty_id,
+                    parameters: ctx.instantiate(&opaque_ty.arguments),
+                }),
+                ImplTraitInstantiationMode::Variable => {
+                    let var = ctx.inf_ctx.new_type_var();
+                    // TODO obligations
+                    var
+                }
+            },
+            Type::Placeholder(param_id) => match &ctx.type_param_mode {
+                TypeParamInstantiationMode::Forbidden => {
+                    never!(true);
+                    Ty::Unknown
+                }
+                TypeParamInstantiationMode::Local(def) => {
+                    let generics = generics(ctx.db.upcast(), *def);
+                    if never!(generics.param_idx(*param_id).is_none()) {
+                        Ty::Unknown
+                    } else {
+                        Ty::Placeholder(*param_id)
+                    }
+                }
+                TypeParamInstantiationMode::Substitute(def, substs) => {
+                    let generics = generics(ctx.db.upcast(), *def);
+                    let idx = if let Some(idx) = generics.param_idx(*param_id) {
+                        idx
+                    } else {
+                        never!(true);
+                        return Ty::Unknown;
+                    };
+                    substs[idx].clone().shift_bound_vars(ctx.shift)
+                }
+            },
+            Type::Dyn(bounds) => {
+                let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
+                ctx.shift.shift_in();
+                let result = Ty::Dyn(
+                    bounds.iter().map(|b| ctx.instantiate_bound(b, self_ty.clone())).collect(),
+                );
+                ctx.shift.shift_out();
+                result
+            }
+            Type::Infer => ctx.inf_ctx.new_type_var(),
+            Type::Error => Ty::Unknown,
+        }
+    }
+}
+
+impl Instantiate for TypeArgs {
+    type InstantiatedType = Substs;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        Substs(self.iter().map(|typ| ctx.instantiate(typ)).collect())
     }
 }
 
@@ -322,4 +346,15 @@ pub(crate) fn instantiate_ctor(name: TypeName) -> TypeCtor {
         TypeName::Tuple { cardinality } => TypeCtor::Tuple { cardinality },
         TypeName::ForeignType(t) => TypeCtor::ForeignType(t),
     }
+}
+
+pub(crate) fn instantiate_outside_inference<T: Instantiate>(
+    db: &dyn HirDatabase,
+    def: GenericDefId,
+    t: &T,
+) -> Binders<T::InstantiatedType> {
+    let generics = generics(db.upcast(), def);
+    let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
+    let instantiated = NoopInstantiateOps.ctx_with_substs(db, def, substs).instantiate(t);
+    Binders::new(generics.len(), instantiated)
 }
