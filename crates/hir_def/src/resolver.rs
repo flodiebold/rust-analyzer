@@ -642,7 +642,7 @@ impl HasResolver for FunctionId {
 
 impl HasResolver for ConstId {
     fn resolver(self, db: &dyn DefDatabase) -> Resolver {
-        self.lookup(db).container.resolver(db)
+        self.lookup(db).container.resolver(db).push_generic_params_scope(db, self.into())
     }
 }
 

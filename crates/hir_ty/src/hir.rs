@@ -94,11 +94,8 @@ pub enum Type {
     /// `impl Trait` in a return type gets its own ID.
     Opaque(OpaqueType),
 
-    /// A placeholder for a type parameter; for example, `T` in `fn f<T>(x: T)
-    /// {}` when we're type-checking the body of that function. In this
-    /// situation, we know this stands for *some* type, but don't know the exact
-    /// type.
-    // FIXME rename to Param
+    /// A type parameter; for example, `T` in `fn f<T>(x: T) {}`.
+    // TODO rename to Param
     Placeholder(TypeParamId),
 
     /// A trait object (`dyn Trait` or bare `Trait` in pre-2018 Rust).

@@ -1,19 +1,82 @@
+/// Instantiation is the process of going from a `hir_ty::hir::Type` to a `Ty`,
+/// which is the representation used for type inference. This may involve
+/// creating inference variables and trait obligations to be checked later, so
+/// it's not a simple transformation, but something that modifies the
+/// surrounding context.
 use crate::{
+    db::HirDatabase,
     hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName},
     utils::generics,
-    ApplicationTy, GenericPredicate, OpaqueTy, ProjectionPredicate, ProjectionTy, Substs, TraitRef,
-    Ty, TypeCtor, ValueTyDefId,
+    ApplicationTy, GenericPredicate, Obligation, OpaqueTy, ProjectionPredicate, ProjectionTy,
+    Substs, TraitRef, Ty, TypeCtor, ValueTyDefId,
 };
 
 use super::InferenceContext;
 use chalk_ir::{BoundVar, DebruijnIndex};
-use hir_def::{adt::StructKind, EnumVariantId, StructId};
+use hir_def::{adt::StructKind, EnumVariantId, GenericDefId, StructId};
 use stdx::never;
 
+trait InstantiateOps {
+    fn new_type_var(&mut self) -> Ty;
+    fn push_obligation(&mut self, obligation: Obligation);
+}
+
 // TODO make it possible to apply a substitution to type parameters while instantiating; assert that no type parameters from outside are instantiated as placeholders
-pub(super) struct InstantiateContext<'a, 'b> {
-    inf_ctx: &'b mut InferenceContext<'a>,
+pub(crate) struct InstantiateContext<'a, 'b> {
+    db: &'a dyn HirDatabase,
+    inf_ctx: &'b mut (dyn InstantiateOps + 'a),
     impl_trait_mode: ImplTraitInstantiationMode,
+    type_param_mode: TypeParamInstantiationMode,
+}
+
+impl<'a> InstantiateOps for InferenceContext<'a> {
+    fn new_type_var(&mut self) -> Ty {
+        self.table.new_type_var()
+    }
+
+    fn push_obligation(&mut self, obligation: Obligation) {
+        self.obligations.push(obligation);
+    }
+}
+
+pub(crate) struct NoopInstantiateOps;
+impl InstantiateOps for NoopInstantiateOps {
+    fn new_type_var(&mut self) -> Ty {
+        // FIXME: maybe assert, not sure
+        Ty::Unknown
+    }
+
+    fn push_obligation(&mut self, _obligation: Obligation) {
+        // FIXME: maybe assert, not sure
+    }
+}
+
+impl NoopInstantiateOps {
+    pub(crate) fn ctx_local<'a>(
+        &mut self,
+        db: &'a dyn HirDatabase,
+        def: GenericDefId,
+    ) -> InstantiateContext<'a, '_> {
+        InstantiateContext {
+            db,
+            inf_ctx: self,
+            impl_trait_mode: ImplTraitInstantiationMode::Variable,
+            type_param_mode: TypeParamInstantiationMode::Local(def),
+        }
+    }
+    pub(crate) fn ctx_with_substs<'a>(
+        &mut self,
+        db: &'a dyn HirDatabase,
+        def: GenericDefId,
+        substs: Substs,
+    ) -> InstantiateContext<'a, '_> {
+        InstantiateContext {
+            db,
+            inf_ctx: self,
+            impl_trait_mode: ImplTraitInstantiationMode::Variable,
+            type_param_mode: TypeParamInstantiationMode::Substitute(def, substs),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -26,9 +89,56 @@ pub enum ImplTraitInstantiationMode {
     Variable,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeParamInstantiationMode {
+    /// There should be no type parameters.
+    Forbidden,
+    /// The type we're instantiating is written in the scope of the given
+    /// definition, and we're instantiating it in that scope, so we're checking
+    /// that type parameters belong to that definition and then instantiating
+    /// them as placeholders.
+    Local(GenericDefId),
+    /// The type we're instantiating is written in the scope of the given
+    /// definition, and we're instantiating it in a different scope, so we're
+    /// checking that type parameters belong to that definition and then
+    /// substituting them by different types.
+    Substitute(GenericDefId, Substs),
+}
+
 impl<'a> InferenceContext<'a> {
-    pub(super) fn instantiate_ctx(&mut self) -> InstantiateContext<'a, '_> {
-        InstantiateContext { inf_ctx: self, impl_trait_mode: ImplTraitInstantiationMode::Opaque }
+    pub(super) fn instantiate_ctx_no_substs(&mut self) -> InstantiateContext<'a, '_> {
+        InstantiateContext {
+            db: self.db,
+            inf_ctx: self,
+            impl_trait_mode: ImplTraitInstantiationMode::Opaque,
+            type_param_mode: TypeParamInstantiationMode::Forbidden,
+        }
+    }
+
+    pub(super) fn instantiate_ctx_local(&mut self) -> InstantiateContext<'a, '_> {
+        let type_param_mode = self
+            .resolver
+            .generic_def()
+            .map_or(TypeParamInstantiationMode::Forbidden, TypeParamInstantiationMode::Local);
+        InstantiateContext {
+            db: self.db,
+            inf_ctx: self,
+            impl_trait_mode: ImplTraitInstantiationMode::Opaque,
+            type_param_mode,
+        }
+    }
+
+    pub(super) fn instantiate_ctx_with_substs(
+        &mut self,
+        def: GenericDefId,
+        substs: Substs,
+    ) -> InstantiateContext<'a, '_> {
+        InstantiateContext {
+            db: self.db,
+            inf_ctx: self,
+            impl_trait_mode: ImplTraitInstantiationMode::Opaque,
+            type_param_mode: TypeParamInstantiationMode::Substitute(def, substs),
+        }
     }
 
     pub(super) fn instantiate_ty_for_struct_constructor(
@@ -52,14 +162,13 @@ impl<'a> InferenceContext<'a> {
                 self.instantiate_ty_for_enum_variant_constructor(it, substs)
             }
             ValueTyDefId::ConstId(it) => {
-                // TODO type args?
                 let typ = self.db.const_type(it);
-                self.instantiate_ctx().instantiate_type(&typ)
+                self.instantiate_ctx_with_substs(it.into(), substs).instantiate_type(&typ)
             }
             ValueTyDefId::StaticId(it) => {
                 never!(!substs.is_empty());
                 let typ = self.db.static_type(it);
-                self.instantiate_ctx().instantiate_type(&typ)
+                self.instantiate_ctx_no_substs().instantiate_type(&typ)
             }
         }
     }
@@ -79,11 +188,11 @@ impl<'a> InferenceContext<'a> {
 }
 
 impl<'a, 'b> InstantiateContext<'a, 'b> {
-    pub(super) fn with_impl_trait_as_variables(self) -> Self {
+    pub(crate) fn with_impl_trait_as_variables(self) -> Self {
         InstantiateContext { impl_trait_mode: ImplTraitInstantiationMode::Variable, ..self }
     }
 
-    pub(super) fn instantiate_type(&mut self, typ: &Type) -> Ty {
+    pub(crate) fn instantiate_type(&mut self, typ: &Type) -> Ty {
         match typ {
             Type::Apply(apply_ty) => Ty::Apply(ApplicationTy {
                 ctor: instantiate_ctor(apply_ty.name),
@@ -92,8 +201,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
             Type::Projection(proj_ty) => {
                 debug_assert!(
                     {
-                        let generics =
-                            generics(self.inf_ctx.db.upcast(), proj_ty.associated_ty.into());
+                        let generics = generics(self.db.upcast(), proj_ty.associated_ty.into());
                         generics.len() == proj_ty.arguments.len()
                     },
                     "proj_ty: {:?}",
@@ -103,7 +211,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
                     associated_ty: proj_ty.associated_ty,
                     parameters: self.instantiate_args(&proj_ty.arguments),
                 };
-                self.inf_ctx.normalize_projection_ty(projection_ty)
+                self.normalize_projection_ty(projection_ty)
             }
             Type::Opaque(opaque_ty) => match self.impl_trait_mode {
                 ImplTraitInstantiationMode::Opaque => Ty::Opaque(OpaqueTy {
@@ -111,17 +219,40 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
                     parameters: self.instantiate_args(&opaque_ty.arguments),
                 }),
                 ImplTraitInstantiationMode::Variable => {
-                    let var = self.inf_ctx.table.new_type_var();
+                    let var = self.inf_ctx.new_type_var();
                     // TODO obligations
                     var
                 }
             },
-            Type::Placeholder(param_id) => Ty::Placeholder(*param_id),
+            Type::Placeholder(param_id) => match &self.type_param_mode {
+                TypeParamInstantiationMode::Forbidden => {
+                    never!(true);
+                    Ty::Unknown
+                }
+                TypeParamInstantiationMode::Local(def) => {
+                    let generics = generics(self.db.upcast(), *def);
+                    if never!(generics.param_idx(*param_id).is_none()) {
+                        Ty::Unknown
+                    } else {
+                        Ty::Placeholder(*param_id)
+                    }
+                }
+                TypeParamInstantiationMode::Substitute(def, substs) => {
+                    let generics = generics(self.db.upcast(), *def);
+                    let idx = if let Some(idx) = generics.param_idx(*param_id) {
+                        idx
+                    } else {
+                        never!(true);
+                        return Ty::Unknown;
+                    };
+                    substs[idx].clone()
+                }
+            },
             Type::Dyn(bounds) => {
                 let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
                 Ty::Dyn(bounds.iter().map(|b| self.instantiate_bound(b, self_ty.clone())).collect())
             }
-            Type::Infer => self.inf_ctx.table.new_type_var(),
+            Type::Infer => self.inf_ctx.new_type_var(),
             Type::Error => Ty::Unknown,
         }
     }
@@ -139,7 +270,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
     }
 
     fn instantiate_trait_bound(&mut self, trait_bound: &TraitBound, self_ty: Ty) -> TraitRef {
-        let substs = Substs::build_for_def(self.inf_ctx.db, trait_bound.trait_)
+        let substs = Substs::build_for_def(self.db, trait_bound.trait_)
             .push(self_ty)
             .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
@@ -151,7 +282,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
         assoc_type_binding: &AssocTypeBinding,
         self_ty: Ty,
     ) -> ProjectionPredicate {
-        let substs = Substs::build_for_def(self.inf_ctx.db, assoc_type_binding.associated_ty)
+        let substs = Substs::build_for_def(self.db, assoc_type_binding.associated_ty)
             .push(self_ty)
             .fill_exact(assoc_type_binding.arguments.iter().map(|typ| self.instantiate_type(typ)))
             .build();
@@ -163,6 +294,14 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
 
     fn instantiate_args(&mut self, args: &TypeArgs) -> Substs {
         Substs(args.iter().map(|typ| self.instantiate_type(typ)).collect())
+    }
+
+    fn normalize_projection_ty(&mut self, proj_ty: ProjectionTy) -> Ty {
+        let var = self.inf_ctx.new_type_var();
+        let predicate = ProjectionPredicate { projection_ty: proj_ty, ty: var.clone() };
+        let obligation = Obligation::Projection(predicate);
+        self.inf_ctx.push_obligation(obligation);
+        var
     }
 }
 

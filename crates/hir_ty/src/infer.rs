@@ -298,7 +298,7 @@ impl<'a> InferenceContext<'a> {
         // FIXME use right resolver for block
         let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
         let typ = ctx.lower_type(type_ref);
-        let ty = self.instantiate_ctx().instantiate_type(&typ);
+        let ty = self.instantiate_ctx_local().instantiate_type(&typ);
         ty
     }
 
@@ -455,7 +455,7 @@ impl<'a> InferenceContext<'a> {
             }
             TypeNs::SelfType(impl_id) => {
                 let typ = self.db.impl_self_ty_2(impl_id);
-                let ty = self.instantiate_ctx().instantiate_type(&typ);
+                let ty = self.instantiate_ctx_local().instantiate_type(&typ);
                 match unresolved {
                     None => {
                         let variant = ty_variant(&ty);
@@ -538,12 +538,12 @@ impl<'a> InferenceContext<'a> {
         let body = Arc::clone(&self.body); // avoid borrow checker problem
         let sig = self.db.function_signature(f);
         for (typ, pat) in sig.params().into_iter().zip(body.params.iter()) {
-            let ty = self.instantiate_ctx().instantiate_type(typ);
+            let ty = self.instantiate_ctx_local().instantiate_type(typ);
 
             self.infer_pat(*pat, &ty, BindingMode::default());
         }
         let return_ty =
-            self.instantiate_ctx().with_impl_trait_as_variables().instantiate_type(sig.ret());
+            self.instantiate_ctx_local().with_impl_trait_as_variables().instantiate_type(sig.ret());
         self.return_ty = return_ty;
     }
 
