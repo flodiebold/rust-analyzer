@@ -538,6 +538,7 @@ dependencies = [
  "chalk-recursive",
  "chalk-solve",
  "ena",
+ "env_logger",
  "expect-test",
  "hir_def",
  "hir_expand",

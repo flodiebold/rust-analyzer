@@ -8,7 +8,10 @@ mod method_resolution;
 mod macros;
 mod display_source_code;
 
-use std::{env, sync::Arc};
+use std::{
+    env,
+    sync::{Arc, Once},
+};
 
 use base_db::{fixture::WithFixture, FileRange, SourceDatabase, SourceDatabaseExt};
 use expect_test::Expect;
@@ -107,6 +110,10 @@ fn infer(ra_fixture: &str) -> String {
 
 fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
     let _tracing = setup_tracing();
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        env_logger::builder().is_test(true).parse_env("RA_LOG").try_init().unwrap();
+    });
     let (db, file_id) = TestDB::with_single_file(content);
 
     let mut buf = String::new();
