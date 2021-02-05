@@ -17,8 +17,8 @@ use hir_def::{
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AssocItemId, ConstId, FunctionId, GenericDefId, ImplId, StaticId, TraitId, TypeAliasId,
-    TypeParamId,
+    AssocItemId, ConstId, ConstParamId, FunctionId, GenericDefId, ImplId, StaticId, TraitId,
+    TypeAliasId, TypeParamId,
 };
 
 use super::FnSig;
@@ -838,4 +838,13 @@ pub(crate) fn static_type_query(db: &dyn HirDatabase, def: StaticId) -> Type {
     let resolver = def.resolver(db.upcast());
     let ctx = Context::new(db, &resolver);
     ctx.lower_type(&data.type_ref)
+}
+
+/// Build the declared type of a const param.
+pub(crate) fn const_param_type_query(db: &dyn HirDatabase, def: ConstParamId) -> Type {
+    let parent_data = db.generic_params(def.parent);
+    let data = &parent_data.consts[def.local_id];
+    let resolver = def.parent.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver);
+    ctx.lower_type(&data.ty)
 }

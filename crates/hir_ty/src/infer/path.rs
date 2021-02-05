@@ -88,7 +88,10 @@ impl<'a> InferenceContext<'a> {
                     return None;
                 }
             }
-            ValueNs::GenericParam(it) => return Some(self.db.const_param_ty(it)),
+            ValueNs::GenericParam(it) => {
+                let typ = self.db.const_param_type(it);
+                return Some(self.instantiate_ctx_local().instantiate(&typ));
+            }
         };
 
         let parent_substs = self_subst.unwrap_or_else(Substs::empty);

@@ -14,9 +14,9 @@ use hir_def::{
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AdtId, AssocContainerId, AssocItemId, ConstId, ConstParamId, EnumId, EnumVariantId, FunctionId,
-    GenericDefId, HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId, TraitId,
-    TypeAliasId, TypeParamId, UnionId, VariantId,
+    AdtId, AssocContainerId, AssocItemId, ConstId, EnumId, EnumVariantId, FunctionId, GenericDefId,
+    HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId, TraitId, TypeAliasId, TypeParamId,
+    UnionId, VariantId,
 };
 use hir_expand::name::Name;
 use la_arena::ArenaMap;
@@ -1139,15 +1139,6 @@ pub(crate) fn ty_recover(db: &dyn HirDatabase, _cycle: &[String], def: &TyDefId)
 pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Binders<Ty> {
     let typ = db.impl_self_type(impl_id);
     instantiate_outside_inference(db, impl_id.into(), &typ)
-}
-
-pub(crate) fn const_param_ty_query(db: &dyn HirDatabase, def: ConstParamId) -> Ty {
-    let parent_data = db.generic_params(def.parent);
-    let data = &parent_data.consts[def.local_id];
-    let resolver = def.parent.resolver(db.upcast());
-    let ctx = TyLoweringContext::new(db, &resolver);
-
-    Ty::from_hir(&ctx, &data.ty)
 }
 
 pub(crate) fn impl_trait_query(db: &dyn HirDatabase, impl_id: ImplId) -> Option<Binders<TraitRef>> {

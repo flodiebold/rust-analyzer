@@ -42,9 +42,8 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::cycle(crate::hir::impl_self_type_recover)]
     fn impl_self_type(&self, def: ImplId) -> Type;
 
-    // TODO make this return Type
-    #[salsa::invoke(crate::lower::const_param_ty_query)]
-    fn const_param_ty(&self, def: ConstParamId) -> Ty;
+    #[salsa::invoke(crate::hir::lower::const_param_type_query)]
+    fn const_param_type(&self, def: ConstParamId) -> Type;
 
     #[salsa::invoke(crate::hir::const_type_query)]
     fn const_type(&self, def: ConstId) -> Type;
