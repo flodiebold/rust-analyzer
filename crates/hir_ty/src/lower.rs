@@ -21,7 +21,7 @@ use hir_def::{
 use hir_expand::name::Name;
 use la_arena::ArenaMap;
 use smallvec::SmallVec;
-use stdx::impl_from;
+use stdx::{always, impl_from};
 use test_utils::mark;
 
 use crate::{
@@ -1158,20 +1158,31 @@ pub(crate) fn return_type_impl_traits(
     db: &dyn HirDatabase,
     def: hir_def::FunctionId,
 ) -> Option<Arc<Binders<ReturnTypeImplTraits>>> {
-    // FIXME unify with fn_sig_for_fn instead of doing lowering twice, maybe
-    let data = db.function_data(def);
-    let resolver = def.resolver(db.upcast());
-    let ctx_ret = TyLoweringContext::new(db, &resolver)
-        .with_impl_trait_mode(ImplTraitLoweringMode::Opaque)
-        .with_type_param_mode(TypeParamLoweringMode::Variable);
-    let _ret = Ty::from_hir(&ctx_ret, &data.ret_type);
-    let generics = generics(db.upcast(), def.into());
-    let num_binders = generics.len();
-    let return_type_impl_traits =
-        ReturnTypeImplTraits { impl_traits: ctx_ret.opaque_type_data.into_inner() };
-    if return_type_impl_traits.impl_traits.is_empty() {
+    let data = db.function_signature(def);
+    let instantiated: Vec<_> = data
+        .impl_traits
+        .iter()
+        .map(|bounds| instantiate_outside_inference(db, def.into(), &&bounds[..]))
+        .collect();
+
+    if instantiated.is_empty() {
         None
     } else {
-        Some(Arc::new(Binders::new(num_binders, return_type_impl_traits)))
+        let num_binders = instantiated[0].num_binders;
+        always!(instantiated.iter().all(|it| it.num_binders == num_binders));
+        let impl_traits = instantiated
+            .into_iter()
+            .map(|it| ReturnTypeImplTrait {
+                bounds: it.map(|v| {
+                    v.into_iter()
+                        .map(|b| {
+                            always!(b.num_binders == 1);
+                            b.value
+                        })
+                        .collect()
+                }),
+            })
+            .collect();
+        Some(Arc::new(Binders::new(num_binders, ReturnTypeImplTraits { impl_traits })))
     }
 }

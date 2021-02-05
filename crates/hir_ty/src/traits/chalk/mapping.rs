@@ -819,7 +819,6 @@ impl ToChalk for hir::Type {
                 }
                 .to_ty::<Interner>(&Interner)
             }
-            // Ty::Bound(idx) => chalk_ir::TyKind::BoundVar(idx).intern(&Interner),
             hir::Type::Dyn(predicates) => {
                 let self_ty = chalk_ir::BoundVar::new(DebruijnIndex::ONE, 0).to_ty(&Interner);
                 let where_clauses = chalk_ir::QuantifiedWhereClauses::from_iter(

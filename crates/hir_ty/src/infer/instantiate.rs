@@ -19,9 +19,16 @@ use stdx::never;
 trait InstantiateOps {
     fn new_type_var(&mut self) -> Ty;
     fn push_obligation(&mut self, obligation: Obligation);
+
+    fn normalize_projection_ty(&mut self, proj_ty: ProjectionTy) -> Ty {
+        let var = self.new_type_var();
+        let predicate = ProjectionPredicate { projection_ty: proj_ty, ty: var.clone() };
+        let obligation = Obligation::Projection(predicate);
+        self.push_obligation(obligation);
+        var
+    }
 }
 
-// TODO make it possible to apply a substitution to type parameters while instantiating; assert that no type parameters from outside are instantiated as placeholders
 pub(crate) struct InstantiateContext<'a, 'b> {
     db: &'a dyn HirDatabase,
     inf_ctx: &'b mut (dyn InstantiateOps + 'a),
@@ -50,6 +57,10 @@ impl InstantiateOps for NoopInstantiateOps {
     fn push_obligation(&mut self, _obligation: Obligation) {
         // FIXME: maybe assert, not sure
     }
+
+    fn normalize_projection_ty(&mut self, proj_ty: ProjectionTy) -> Ty {
+        Ty::Projection(proj_ty)
+    }
 }
 
 impl NoopInstantiateOps {
@@ -62,7 +73,7 @@ impl NoopInstantiateOps {
         InstantiateContext {
             db,
             inf_ctx: self,
-            impl_trait_mode: ImplTraitInstantiationMode::Variable,
+            impl_trait_mode: ImplTraitInstantiationMode::Opaque,
             type_param_mode: TypeParamInstantiationMode::Substitute(def, substs),
             shift: DebruijnIndex::INNERMOST,
         }
@@ -181,7 +192,7 @@ impl<'a> InferenceContext<'a> {
 }
 
 pub(crate) trait Instantiate {
-    type InstantiatedType;
+    type InstantiatedType: std::fmt::Debug;
     fn do_instantiate<'a, 'b>(
         &self,
         ctx: &mut InstantiateContext<'a, 'b>,
@@ -233,11 +244,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
     }
 
     fn normalize_projection_ty(&mut self, proj_ty: ProjectionTy) -> Ty {
-        let var = self.inf_ctx.new_type_var();
-        let predicate = ProjectionPredicate { projection_ty: proj_ty, ty: var.clone() };
-        let obligation = Obligation::Projection(predicate);
-        self.inf_ctx.push_obligation(obligation);
-        var
+        self.inf_ctx.normalize_projection_ty(proj_ty)
     }
 }
 
@@ -326,6 +333,32 @@ impl Instantiate for TypeArgs {
         ctx: &mut InstantiateContext<'a, 'b>,
     ) -> Self::InstantiatedType {
         Substs(self.iter().map(|typ| ctx.instantiate(typ)).collect())
+    }
+}
+
+impl Instantiate for Bound {
+    type InstantiatedType = Binders<GenericPredicate>;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        ctx.shift.shift_in();
+        let inner =
+            ctx.instantiate_bound(self, Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0)));
+        ctx.shift.shift_out();
+        Binders::new(1, inner)
+    }
+}
+
+impl<T: Instantiate> Instantiate for &[T] {
+    type InstantiatedType = Vec<T::InstantiatedType>;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        self.iter().map(|t| ctx.instantiate(t)).collect()
     }
 }
 

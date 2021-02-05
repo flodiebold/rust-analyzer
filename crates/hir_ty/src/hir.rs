@@ -180,7 +180,6 @@ impl Type {
         Type::apply(TypeName::Tuple { cardinality: 0 }, TypeArgs::empty())
     }
 
-
     /// If this is a `dyn Trait` type, this returns the `Trait` part.
     pub fn dyn_trait_bound(&self) -> Option<&TraitBound> {
         match self {
@@ -393,6 +392,12 @@ impl FnSig {
     pub fn ret(&self) -> &Type {
         &self.params_and_return[self.params_and_return.len() - 1]
     }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LoweredFn {
+    pub sig: FnSig,
+    pub impl_traits: Arc<[smallvec::SmallVec<[Bound; 1]>]>,
 }
 
 pub(crate) use lower::{

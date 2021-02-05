@@ -21,11 +21,11 @@ use hir_def::{
     TypeAliasId, TypeParamId,
 };
 
-use super::FnSig;
 use super::{
     substitute, ApplicationType, AssocTypeBinding, Bound, HirTypeWalk, OpaqueType, ProjectionType,
     TraitBound, Type, TypeArgs, TypeName,
 };
+use super::{FnSig, LoweredFn};
 use crate::{
     db::HirDatabase,
     primitive::{FloatTy, IntTy},
@@ -41,7 +41,7 @@ pub(crate) struct Context<'a> {
     resolver: &'a Resolver,
     impl_trait_mode: ImplTraitLoweringMode,
     impl_trait_counter: Cell<u16>,
-    opaque_type_data: RefCell<Vec<Arc<[Bound]>>>,
+    opaque_type_data: RefCell<Vec<SmallVec<[Bound; 1]>>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -126,7 +126,7 @@ impl<'a> Context<'a> {
                         // this dance is to make sure the data is in the right
                         // place even if we encounter more opaque types while
                         // lowering the bounds
-                        self.opaque_type_data.borrow_mut().push(Arc::new([]));
+                        self.opaque_type_data.borrow_mut().push(SmallVec::new());
                         // We don't want to lower the bounds inside the binders
                         // we're currently in, because they don't end up inside
                         // those binders. E.g. when we have `impl Trait<impl
@@ -145,8 +145,12 @@ impl<'a> Context<'a> {
                         };
                         let opaque_ty_id = OpaqueTyId::ReturnTypeImplTrait(func, idx);
                         let generics = generics(self.db.upcast(), func.into());
-                        Type::Opaque(OpaqueType { opaque_ty_id, arguments: TypeArgs::empty() })
-                        // TODO
+                        let type_args = if let Some(def) = self.resolver.generic_def() {
+                            TypeArgs::type_params(self.db.upcast(), def)
+                        } else {
+                            TypeArgs::empty()
+                        };
+                        Type::Opaque(OpaqueType { opaque_ty_id, arguments: type_args })
                     }
                     ImplTraitLoweringMode::Param => {
                         let idx = self.impl_trait_counter.get();
@@ -814,14 +818,16 @@ pub(crate) fn generic_defaults_query(db: &dyn HirDatabase, def: GenericDefId) ->
     defaults
 }
 
-pub(crate) fn function_signature_query(db: &dyn HirDatabase, f: FunctionId) -> FnSig {
+pub(crate) fn function_signature_query(db: &dyn HirDatabase, f: FunctionId) -> LoweredFn {
     let data = db.function_data(f);
     let resolver = f.resolver(db.upcast());
     let ctx_param = Context::new(db, &resolver).with_impl_trait_mode(ImplTraitLoweringMode::Param);
     let params = data.params.iter().map(|tr| ctx_param.lower_type(tr)).collect::<Vec<_>>();
     let ctx_ret = ctx_param.with_impl_trait_mode(ImplTraitLoweringMode::Opaque);
     let ret = ctx_ret.lower_type(&data.ret_type);
-    FnSig::from_params_and_return(params, ret, data.is_varargs)
+    let sig = FnSig::from_params_and_return(params, ret, data.is_varargs);
+    let impl_traits = ctx_ret.opaque_type_data.into_inner().into();
+    LoweredFn { sig, impl_traits }
 }
 
 /// Build the declared type of a const.

@@ -177,25 +177,24 @@ impl<'a> chalk_solve::RustIrDatabase<Interner> for ChalkContext<'a> {
         let full_id = self.db.lookup_intern_impl_trait_id(interned_id);
         let bound = match full_id {
             crate::OpaqueTyId::ReturnTypeImplTrait(func, idx) => {
-                let datas = self
-                    .db
-                    .return_type_impl_traits(func)
-                    .expect("impl trait id without impl traits");
-                let data = &datas.value.impl_traits[idx as usize];
+                let datas = self.db.function_signature(func).impl_traits;
+                let data = &datas[idx as usize];
+                let instantiated =
+                    crate::infer::instantiate_outside_inference(self.db, func.into(), &&data[..]);
                 let bound = OpaqueTyDatumBound {
                     bounds: make_binders(
-                        data.bounds
+                        instantiated
                             .value
                             .iter()
                             .cloned()
-                            .filter(|b| !b.is_error())
-                            .map(|b| b.to_chalk(self.db))
+                            .filter(|b| !b.value.is_error())
+                            .map(|b| b.value.to_chalk(self.db))
                             .collect(),
                         1,
                     ),
                     where_clauses: make_binders(vec![], 0),
                 };
-                let num_vars = datas.num_binders;
+                let num_vars = instantiated.num_binders;
                 make_binders(bound, num_vars)
             }
             crate::OpaqueTyId::AsyncBlockTypeImplTrait(..) => {

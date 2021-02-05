@@ -536,14 +536,16 @@ impl<'a> InferenceContext<'a> {
 
     fn collect_fn(&mut self, f: FunctionId) {
         let body = Arc::clone(&self.body); // avoid borrow checker problem
-        let sig = self.db.function_signature(f);
-        for (typ, pat) in sig.params().into_iter().zip(body.params.iter()) {
+        let lowered_fn = self.db.function_signature(f);
+        for (typ, pat) in lowered_fn.sig.params().into_iter().zip(body.params.iter()) {
             let ty = self.instantiate_ctx_local().instantiate(typ);
 
             self.infer_pat(*pat, &ty, BindingMode::default());
         }
-        let return_ty =
-            self.instantiate_ctx_local().with_impl_trait_as_variables().instantiate(sig.ret());
+        let return_ty = self
+            .instantiate_ctx_local()
+            .with_impl_trait_as_variables()
+            .instantiate(lowered_fn.sig.ret());
         self.return_ty = return_ty;
     }
 
