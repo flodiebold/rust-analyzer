@@ -95,8 +95,7 @@ pub enum Type {
     Opaque(OpaqueType),
 
     /// A type parameter; for example, `T` in `fn f<T>(x: T) {}`.
-    // TODO rename to Param
-    Placeholder(TypeParamId),
+    Param(TypeParamId),
 
     /// A trait object (`dyn Trait` or bare `Trait` in pre-2018 Rust).
     Dyn(Arc<[Bound]>),
@@ -199,7 +198,7 @@ impl TypeArgs {
         generics
             .iter()
             .filter(|(_, data)| data.provenance != TypeParamProvenance::TraitSelf)
-            .map(|(id, _)| Type::Placeholder(id))
+            .map(|(id, _)| Type::Param(id))
             .collect()
     }
 
@@ -250,7 +249,7 @@ impl HirTypeWalk for Type {
                     bound.walk(f);
                 }
             }
-            Type::Placeholder(_) => {}
+            Type::Param(_) => {}
             Type::Infer => {}
             Type::Error => {}
         }
@@ -272,7 +271,7 @@ impl HirTypeWalk for Type {
                     bound.walk_mut(f);
                 }
             }
-            Type::Placeholder(_) => {}
+            Type::Param(_) => {}
             Type::Infer => {}
             Type::Error => {}
         }
@@ -342,7 +341,7 @@ pub(crate) fn substitute<T: HirTypeWalk + std::fmt::Debug>(
     // self params are skipped in the HIR
     let (_, self_params, _, _) = generics.provenance_split();
     t.walk_mut(&mut |ty| match ty {
-        Type::Placeholder(param_id) => {
+        Type::Param(param_id) => {
             if let Some(idx) = generics.param_idx(*param_id) {
                 *ty = args[idx - self_params].clone();
             }

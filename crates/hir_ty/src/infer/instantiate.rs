@@ -279,7 +279,7 @@ impl Instantiate for Type {
                     var
                 }
             },
-            Type::Placeholder(param_id) => match &ctx.type_param_mode {
+            Type::Param(param_id) => match &ctx.type_param_mode {
                 TypeParamInstantiationMode::Forbidden => {
                     never!(true);
                     Ty::Unknown

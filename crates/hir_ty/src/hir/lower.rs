@@ -160,7 +160,7 @@ impl<'a> Context<'a> {
                                     data.provenance == TypeParamProvenance::ArgumentImplTrait
                                 })
                                 .nth(idx as usize)
-                                .map_or(Type::Error, |(id, _)| Type::Placeholder(id));
+                                .map_or(Type::Error, |(id, _)| Type::Param(id));
                             param
                         } else {
                             panic!("argument impl trait lowering without generic context")
@@ -288,7 +288,7 @@ impl<'a> Context<'a> {
                 };
                 return (ty, None);
             }
-            TypeNs::GenericParam(param_id) => Type::Placeholder(param_id),
+            TypeNs::GenericParam(param_id) => Type::Param(param_id),
             TypeNs::SelfType(impl_id) => self.db.impl_self_type(impl_id),
             TypeNs::AdtSelfType(adt) => {
                 let generics = generics(self.db.upcast(), adt.into());
@@ -794,7 +794,7 @@ pub(crate) fn generic_defaults_query(db: &dyn HirDatabase, def: GenericDefId) ->
 
             // Each default can only refer to previous parameters.
             ty.walk_mut(&mut |ty| match ty {
-                Type::Placeholder(param_id) => {
+                Type::Param(param_id) => {
                     let param_idx =
                         generic_params.param_idx(*param_id).expect("generic param without index");
                     if param_idx >= idx {

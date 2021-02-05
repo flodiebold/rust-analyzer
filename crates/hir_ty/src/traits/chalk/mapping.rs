@@ -810,7 +810,7 @@ impl ToChalk for hir::Type {
                 .cast(&Interner)
                 .intern(&Interner)
             }
-            hir::Type::Placeholder(id) => {
+            hir::Type::Param(id) => {
                 // TODO probably wrong
                 let interned_id = db.intern_type_param_id(id);
                 PlaceholderIndex {
