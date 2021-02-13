@@ -1051,21 +1051,6 @@ fn type_for_adt(db: &dyn HirDatabase, adt: AdtId) -> Binders<Ty> {
     Binders::new(substs.len(), Ty::apply(TypeCtor::Adt(adt), substs))
 }
 
-fn type_for_type_alias(db: &dyn HirDatabase, t: TypeAliasId) -> Binders<Ty> {
-    let generics = generics(db.upcast(), t.into());
-    let resolver = t.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
-    if db.type_alias_data(t).is_extern {
-        Binders::new(substs.len(), Ty::apply(TypeCtor::ForeignType(t), substs))
-    } else {
-        let type_ref = &db.type_alias_data(t).type_ref;
-        let inner = Ty::from_hir(&ctx, type_ref.as_ref().unwrap_or(&TypeRef::Error));
-        Binders::new(substs.len(), inner)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CallableDefId {
     FunctionId(FunctionId),
@@ -1123,17 +1108,11 @@ pub(crate) fn ty_query(db: &dyn HirDatabase, def: TyDefId) -> Binders<Ty> {
     match def {
         TyDefId::BuiltinType(it) => Binders::new(0, Ty::builtin(it)),
         TyDefId::AdtId(it) => type_for_adt(db, it),
-        TyDefId::TypeAliasId(it) => type_for_type_alias(db, it),
+        TyDefId::TypeAliasId(it) => {
+            let typ = db.type_alias_type(it);
+            instantiate_outside_inference(db, it.into(), &typ)
+        }
     }
-}
-
-pub(crate) fn ty_recover(db: &dyn HirDatabase, _cycle: &[String], def: &TyDefId) -> Binders<Ty> {
-    let num_binders = match *def {
-        TyDefId::BuiltinType(_) => 0,
-        TyDefId::AdtId(it) => generics(db.upcast(), it.into()).len(),
-        TyDefId::TypeAliasId(it) => generics(db.upcast(), it.into()).len(),
-    };
-    Binders::new(num_binders, Ty::Unknown)
 }
 
 pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Binders<Ty> {
