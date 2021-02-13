@@ -53,6 +53,7 @@ impl TyFingerprint {
             Type::Apply(a_ty) => {
                 Some(TyFingerprint::Apply(crate::infer::instantiate_ctor(a_ty.name)))
             }
+            Type::Dyn(_) => typ.dyn_trait().map(|trait_| TyFingerprint::Dyn(trait_)),
             _ => None,
         }
     }

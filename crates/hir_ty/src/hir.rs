@@ -179,6 +179,23 @@ impl Type {
     pub fn unit() -> Self {
         Type::apply(TypeName::Tuple { cardinality: 0 }, TypeArgs::empty())
     }
+
+
+    /// If this is a `dyn Trait` type, this returns the `Trait` part.
+    pub fn dyn_trait_bound(&self) -> Option<&TraitBound> {
+        match self {
+            Type::Dyn(bounds) => bounds.get(0).and_then(|b| match b {
+                Bound::Trait(trait_bound) => Some(trait_bound),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If this is a `dyn Trait`, returns that trait.
+    pub fn dyn_trait(&self) -> Option<TraitId> {
+        self.dyn_trait_bound().map(|it| it.trait_)
+    }
 }
 
 impl TypeArgs {
