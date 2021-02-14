@@ -12,7 +12,7 @@ use hir_def::{
     builtin_type::BuiltinType,
     generics::{TypeParamProvenance, WherePredicate, WherePredicateTypeTarget},
     path::{GenericArg, Path, PathSegment, PathSegments},
-    resolver::{HasResolver, Resolver, TypeNs},
+    resolver::{Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
     AdtId, AssocContainerId, AssocItemId, ConstId, EnumId, EnumVariantId, FunctionId, GenericDefId,
     HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId, TraitId, TypeAliasId, TypeParamId,
@@ -28,7 +28,7 @@ use crate::{
     infer::instantiate_outside_inference,
     utils::{
         all_super_trait_refs, associated_type_by_name_including_super_traits, generics,
-        make_mut_slice, variant_data,
+        make_mut_slice,
     },
     Binders, BoundVar, DebruijnIndex, GenericPredicate, OpaqueTy, OpaqueTyId, PolyFnSig,
     ProjectionPredicate, ProjectionTy, ReturnTypeImplTrait, ReturnTypeImplTraits, Substs,
@@ -807,18 +807,15 @@ pub(crate) fn field_types_query(
     db: &dyn HirDatabase,
     variant_id: VariantId,
 ) -> Arc<ArenaMap<LocalFieldId, Binders<Ty>>> {
-    let var_data = variant_data(db.upcast(), variant_id);
-    let (resolver, def): (_, GenericDefId) = match variant_id {
-        VariantId::StructId(it) => (it.resolver(db.upcast()), it.into()),
-        VariantId::UnionId(it) => (it.resolver(db.upcast()), it.into()),
-        VariantId::EnumVariantId(it) => (it.parent.resolver(db.upcast()), it.parent.into()),
+    let def = match variant_id {
+        VariantId::StructId(it) => it.into(),
+        VariantId::UnionId(it) => it.into(),
+        VariantId::EnumVariantId(it) => it.parent.into(),
     };
-    let generics = generics(db.upcast(), def);
+    let field_types = db.field_types_2(variant_id);
     let mut res = ArenaMap::default();
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    for (field_id, field_data) in var_data.fields().iter() {
-        res.insert(field_id, Binders::new(generics.len(), Ty::from_hir(&ctx, &field_data.type_ref)))
+    for (field_id, typ) in field_types.iter() {
+        res.insert(field_id, instantiate_outside_inference(db, def, typ));
     }
     Arc::new(res)
 }

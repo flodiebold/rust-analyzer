@@ -407,7 +407,7 @@ pub struct LoweredFn {
 }
 
 pub(crate) use lower::{
-    callable_item_signature_query, const_type_query, function_signature_query,
+    callable_item_signature_query, const_type_query, field_types_query, function_signature_query,
     generic_bounds_for_param_query, generic_bounds_for_param_recover, generic_bounds_query,
     generic_defaults_query, impl_self_type_query, impl_self_type_recover, impl_trait_query,
     static_type_query, type_alias_type_query, type_alias_type_recover,

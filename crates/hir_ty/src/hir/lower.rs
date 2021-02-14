@@ -17,9 +17,10 @@ use hir_def::{
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AssocItemId, ConstId, ConstParamId, EnumVariantId, FunctionId, GenericDefId, ImplId, StaticId,
-    StructId, TraitId, TypeAliasId, TypeParamId,
+    AssocItemId, ConstId, ConstParamId, EnumVariantId, FunctionId, GenericDefId, ImplId,
+    LocalFieldId, StaticId, StructId, TraitId, TypeAliasId, TypeParamId, VariantId,
 };
+use la_arena::ArenaMap;
 use test_utils::mark;
 
 use super::{
@@ -919,4 +920,24 @@ pub(crate) fn const_param_type_query(db: &dyn HirDatabase, def: ConstParamId) ->
     let resolver = def.parent.resolver(db.upcast());
     let ctx = Context::new(db, &resolver);
     ctx.lower_type(&data.ty)
+}
+
+/// Build the type of all specific fields of a struct or enum variant.
+pub(crate) fn field_types_query(
+    db: &dyn HirDatabase,
+    variant_id: VariantId,
+) -> Arc<ArenaMap<LocalFieldId, Type>> {
+    let var_data = crate::utils::variant_data(db.upcast(), variant_id);
+    let (resolver, def): (_, GenericDefId) = match variant_id {
+        VariantId::StructId(it) => (it.resolver(db.upcast()), it.into()),
+        VariantId::UnionId(it) => (it.resolver(db.upcast()), it.into()),
+        VariantId::EnumVariantId(it) => (it.parent.resolver(db.upcast()), it.parent.into()),
+    };
+    let generics = generics(db.upcast(), def);
+    let mut res = ArenaMap::default();
+    let ctx = Context::new(db, &resolver);
+    for (field_id, field_data) in var_data.fields().iter() {
+        res.insert(field_id, ctx.lower_type(&field_data.type_ref))
+    }
+    Arc::new(res)
 }
