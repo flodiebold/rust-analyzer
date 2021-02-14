@@ -391,7 +391,7 @@ impl Ty {
         Ty::from_type_relative_path(ctx, ty, Some(resolution), remaining_segments)
     }
 
-    pub(crate) fn from_hir_path(ctx: &TyLoweringContext<'_>, path: &Path) -> (Ty, Option<TypeNs>) {
+    fn from_hir_path(ctx: &TyLoweringContext<'_>, path: &Path) -> (Ty, Option<TypeNs>) {
         // Resolve the path (in type namespace)
         if let Some(type_ref) = path.type_anchor() {
             let (ty, res) = Ty::from_hir_ext(ctx, &type_ref);
@@ -619,7 +619,7 @@ impl TraitRef {
 }
 
 impl GenericPredicate {
-    pub(crate) fn from_where_predicate<'a>(
+    fn from_where_predicate<'a>(
         ctx: &'a TyLoweringContext<'a>,
         where_predicate: &'a WherePredicate,
     ) -> impl Iterator<Item = GenericPredicate> + 'a {
@@ -650,7 +650,7 @@ impl GenericPredicate {
         }
     }
 
-    pub(crate) fn from_type_bound<'a>(
+    fn from_type_bound<'a>(
         ctx: &'a TyLoweringContext<'a>,
         bound: &'a TypeBound,
         self_ty: Ty,
