@@ -75,7 +75,6 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     ) -> Option<Arc<Binders<ReturnTypeImplTraits>>>;
 
     #[salsa::invoke(crate::lower::generic_predicates_for_param_query)]
-    #[salsa::cycle(crate::lower::generic_predicates_for_param_recover)]
     fn generic_predicates_for_param(
         &self,
         param_id: TypeParamId,

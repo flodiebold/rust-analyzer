@@ -273,32 +273,6 @@ impl Ty {
         (ty, res)
     }
 
-    /// This is only for `generic_predicates_for_param`, where we can't just
-    /// lower the self types of the predicates since that could lead to cycles.
-    /// So we just check here if the `type_ref` resolves to a generic param, and which.
-    fn from_hir_only_param(ctx: &TyLoweringContext<'_>, type_ref: &TypeRef) -> Option<TypeParamId> {
-        let path = match type_ref {
-            TypeRef::Path(path) => path,
-            _ => return None,
-        };
-        if path.type_anchor().is_some() {
-            return None;
-        }
-        if path.segments().len() > 1 {
-            return None;
-        }
-        let resolution =
-            match ctx.resolver.resolve_path_in_type_ns(ctx.db.upcast(), path.mod_path()) {
-                Some((it, None)) => it,
-                _ => return None,
-            };
-        if let TypeNs::GenericParam(param_id) = resolution {
-            Some(param_id)
-        } else {
-            None
-        }
-    }
-
     pub(crate) fn from_type_relative_path(
         ctx: &TyLoweringContext<'_>,
         ty: Ty,
@@ -861,36 +835,19 @@ pub(crate) fn generic_predicates_for_param_query(
     db: &dyn HirDatabase,
     param_id: TypeParamId,
 ) -> Arc<[Binders<GenericPredicate>]> {
-    let resolver = param_id.parent.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let generics = generics(db.upcast(), param_id.parent);
-    resolver
-        .where_predicates_in_scope()
-        // we have to filter out all other predicates *first*, before attempting to lower them
-        .filter(|pred| match pred {
-            WherePredicate::ForLifetime { target, .. }
-            | WherePredicate::TypeBound { target, .. } => match target {
-                WherePredicateTypeTarget::TypeRef(type_ref) => {
-                    Ty::from_hir_only_param(&ctx, type_ref) == Some(param_id)
-                }
-                WherePredicateTypeTarget::TypeParam(local_id) => *local_id == param_id.local_id,
-            },
-            WherePredicate::Lifetime { .. } => false,
-        })
-        .flat_map(|pred| {
-            GenericPredicate::from_where_predicate(&ctx, pred)
-                .map(|p| Binders::new(generics.len(), p))
+    // FIXME: slightly hacky, but only needed temporarily
+    let bounds = db.generic_bounds_for_param(param_id);
+    let param_typ = crate::hir::Type::Param(param_id);
+    bounds
+        .iter()
+        .map(|b| {
+            instantiate_outside_inference(
+                db,
+                param_id.parent,
+                &crate::hir::WhereClause { ty: param_typ.clone(), bound: b.clone() },
+            )
         })
         .collect()
-}
-
-pub(crate) fn generic_predicates_for_param_recover(
-    _db: &dyn HirDatabase,
-    _cycle: &[String],
-    _param_id: &TypeParamId,
-) -> Arc<[Binders<GenericPredicate>]> {
-    Arc::new([])
 }
 
 impl TraitEnvironment {
