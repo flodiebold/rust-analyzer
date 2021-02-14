@@ -17,9 +17,10 @@ use hir_def::{
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{HasResolver, Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AssocItemId, ConstId, ConstParamId, FunctionId, GenericDefId, ImplId, StaticId, TraitId,
-    TypeAliasId, TypeParamId,
+    AssocItemId, ConstId, ConstParamId, EnumVariantId, FunctionId, GenericDefId, ImplId, StaticId,
+    StructId, TraitId, TypeAliasId, TypeParamId,
 };
+use test_utils::mark;
 
 use super::{
     substitute, ApplicationType, AssocTypeBinding, Bound, HirTypeWalk, OpaqueType, ProjectionType,
@@ -30,7 +31,7 @@ use crate::{
     db::HirDatabase,
     primitive::{FloatTy, IntTy},
     utils::generics,
-    OpaqueTyId, TyDefId, ValueTyDefId,
+    CallableDefId, OpaqueTyId, TyDefId, ValueTyDefId,
 };
 use hir_expand::name::Name;
 use smallvec::SmallVec;
@@ -119,6 +120,7 @@ impl<'a> Context<'a> {
             TypeRef::ImplTrait(bounds) => {
                 match self.impl_trait_mode {
                     ImplTraitLoweringMode::Opaque => {
+                        mark::hit!(lower_rpit);
                         let idx = self.impl_trait_counter.get();
                         self.impl_trait_counter.set(idx + 1);
 
@@ -828,6 +830,39 @@ pub(crate) fn function_signature_query(db: &dyn HirDatabase, f: FunctionId) -> L
     let sig = FnSig::from_params_and_return(params, ret, data.is_varargs);
     let impl_traits = ctx_ret.opaque_type_data.into_inner().into();
     LoweredFn { sig, impl_traits }
+}
+
+pub(crate) fn callable_item_signature_query(db: &dyn HirDatabase, def: CallableDefId) -> FnSig {
+    match def {
+        CallableDefId::FunctionId(f) => db.function_signature(f).sig,
+        CallableDefId::StructId(s) => fn_sig_for_struct_constructor(db, s),
+        CallableDefId::EnumVariantId(e) => fn_sig_for_enum_variant_constructor(db, e),
+    }
+}
+
+fn fn_sig_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> FnSig {
+    let struct_data = db.struct_data(def);
+    let fields = struct_data.variant_data.fields();
+    let resolver = def.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver).with_impl_trait_mode(ImplTraitLoweringMode::Param);
+    let params =
+        fields.iter().map(|(_, field)| ctx.lower_type(&field.type_ref)).collect::<Vec<_>>();
+    let args = TypeArgs::type_params(db.upcast(), def.into());
+    let ret = Type::apply(TypeName::Adt(def.into()), args);
+    FnSig::from_params_and_return(params, ret, false)
+}
+
+fn fn_sig_for_enum_variant_constructor(db: &dyn HirDatabase, def: EnumVariantId) -> FnSig {
+    let enum_data = db.enum_data(def.parent);
+    let var_data = &enum_data.variants[def.local_id];
+    let fields = var_data.variant_data.fields();
+    let resolver = def.parent.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver).with_impl_trait_mode(ImplTraitLoweringMode::Param);
+    let params =
+        fields.iter().map(|(_, field)| ctx.lower_type(&field.type_ref)).collect::<Vec<_>>();
+    let args = TypeArgs::type_params(db.upcast(), def.parent.into());
+    let ret = Type::apply(TypeName::Adt(def.parent.into()), args);
+    FnSig::from_params_and_return(params, ret, false)
 }
 
 /// Build the declared type of a const.

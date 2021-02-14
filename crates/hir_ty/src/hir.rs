@@ -372,7 +372,7 @@ pub(crate) fn substitute<T: HirTypeWalk + std::fmt::Debug>(
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FnSig {
     params_and_return: Arc<[Type]>,
-    is_varargs: bool,
+    pub is_varargs: bool,
 }
 
 impl FnSig {
@@ -401,8 +401,8 @@ pub struct LoweredFn {
 }
 
 pub(crate) use lower::{
-    const_type_query, function_signature_query, generic_bounds_for_param_query,
-    generic_bounds_for_param_recover, generic_defaults_query, impl_self_type_query,
-    impl_self_type_recover, impl_trait_query, static_type_query, type_alias_type_query,
-    type_alias_type_recover,
+    callable_item_signature_query, const_type_query, function_signature_query,
+    generic_bounds_for_param_query, generic_bounds_for_param_recover, generic_defaults_query,
+    impl_self_type_query, impl_self_type_recover, impl_trait_query, static_type_query,
+    type_alias_type_query, type_alias_type_recover,
 };

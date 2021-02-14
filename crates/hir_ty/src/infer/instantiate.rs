@@ -351,6 +351,21 @@ impl Instantiate for Bound {
     }
 }
 
+impl Instantiate for crate::hir::FnSig {
+    type InstantiatedType = crate::FnSig;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        crate::FnSig::from_params_and_return(
+            self.params().iter().map(|t| ctx.instantiate(t)).collect(),
+            ctx.instantiate(self.ret()),
+            self.is_varargs,
+        )
+    }
+}
+
 impl<T: Instantiate> Instantiate for &[T] {
     type InstantiatedType = Vec<T::InstantiatedType>;
 

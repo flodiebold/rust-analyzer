@@ -22,7 +22,6 @@ use hir_expand::name::Name;
 use la_arena::ArenaMap;
 use smallvec::SmallVec;
 use stdx::{always, impl_from};
-use test_utils::mark;
 
 use crate::{
     db::HirDatabase,
@@ -31,7 +30,7 @@ use crate::{
         all_super_trait_refs, associated_type_by_name_including_super_traits, generics,
         make_mut_slice, variant_data,
     },
-    Binders, BoundVar, DebruijnIndex, FnSig, GenericPredicate, OpaqueTy, OpaqueTyId, PolyFnSig,
+    Binders, BoundVar, DebruijnIndex, GenericPredicate, OpaqueTy, OpaqueTyId, PolyFnSig,
     ProjectionPredicate, ProjectionTy, ReturnTypeImplTrait, ReturnTypeImplTraits, Substs,
     TraitEnvironment, TraitRef, Ty, TypeCtor, TypeWalk,
 };
@@ -759,7 +758,6 @@ fn assoc_type_bindings_from_type_bound<'a>(
 
 impl ReturnTypeImplTrait {
     fn from_hir(ctx: &TyLoweringContext, bounds: &[TypeBound]) -> Self {
-        mark::hit!(lower_rpit);
         let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
         let predicates = ctx.with_shifted_in(DebruijnIndex::ONE, |ctx| {
             bounds
@@ -783,11 +781,8 @@ fn count_impl_traits(type_ref: &TypeRef) -> usize {
 
 /// Build the signature of a callable item (function, struct or enum variant).
 pub fn callable_item_sig(db: &dyn HirDatabase, def: CallableDefId) -> PolyFnSig {
-    match def {
-        CallableDefId::FunctionId(f) => fn_sig_for_fn(db, f),
-        CallableDefId::StructId(s) => fn_sig_for_struct_constructor(db, s),
-        CallableDefId::EnumVariantId(e) => fn_sig_for_enum_variant_constructor(db, e),
-    }
+    let sig = db.callable_item_signature_2(def);
+    instantiate_outside_inference(db, def.into(), &sig)
 }
 
 pub fn associated_type_shorthand_candidates<R>(
@@ -1004,53 +999,6 @@ pub(crate) fn generic_defaults_query(
     defaults
 }
 
-fn fn_sig_for_fn(db: &dyn HirDatabase, def: FunctionId) -> PolyFnSig {
-    let data = db.function_data(def);
-    let resolver = def.resolver(db.upcast());
-    let ctx_params = TyLoweringContext::new(db, &resolver)
-        .with_impl_trait_mode(ImplTraitLoweringMode::Variable)
-        .with_type_param_mode(TypeParamLoweringMode::Variable);
-    let params = data.params.iter().map(|tr| Ty::from_hir(&ctx_params, tr)).collect::<Vec<_>>();
-    let ctx_ret = TyLoweringContext::new(db, &resolver)
-        .with_impl_trait_mode(ImplTraitLoweringMode::Opaque)
-        .with_type_param_mode(TypeParamLoweringMode::Variable);
-    let ret = Ty::from_hir(&ctx_ret, &data.ret_type);
-    let generics = generics(db.upcast(), def.into());
-    let num_binders = generics.len();
-    Binders::new(num_binders, FnSig::from_params_and_return(params, ret, data.is_varargs))
-}
-
-fn fn_sig_for_struct_constructor(db: &dyn HirDatabase, def: StructId) -> PolyFnSig {
-    let struct_data = db.struct_data(def);
-    let fields = struct_data.variant_data.fields();
-    let resolver = def.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let params =
-        fields.iter().map(|(_, field)| Ty::from_hir(&ctx, &field.type_ref)).collect::<Vec<_>>();
-    let ret = type_for_adt(db, def.into());
-    Binders::new(ret.num_binders, FnSig::from_params_and_return(params, ret.value, false))
-}
-
-fn fn_sig_for_enum_variant_constructor(db: &dyn HirDatabase, def: EnumVariantId) -> PolyFnSig {
-    let enum_data = db.enum_data(def.parent);
-    let var_data = &enum_data.variants[def.local_id];
-    let fields = var_data.variant_data.fields();
-    let resolver = def.parent.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let params =
-        fields.iter().map(|(_, field)| Ty::from_hir(&ctx, &field.type_ref)).collect::<Vec<_>>();
-    let ret = type_for_adt(db, def.parent.into());
-    Binders::new(ret.num_binders, FnSig::from_params_and_return(params, ret.value, false))
-}
-
-fn type_for_adt(db: &dyn HirDatabase, adt: AdtId) -> Binders<Ty> {
-    let generics = generics(db.upcast(), adt.into());
-    let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
-    Binders::new(substs.len(), Ty::apply(TypeCtor::Adt(adt), substs))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CallableDefId {
     FunctionId(FunctionId),
@@ -1107,7 +1055,13 @@ impl_from!(FunctionId, StructId, UnionId, EnumVariantId, ConstId, StaticId for V
 pub(crate) fn ty_query(db: &dyn HirDatabase, def: TyDefId) -> Binders<Ty> {
     match def {
         TyDefId::BuiltinType(it) => Binders::new(0, Ty::builtin(it)),
-        TyDefId::AdtId(it) => type_for_adt(db, it),
+        TyDefId::AdtId(it) => {
+            let db = db;
+            let adt = it;
+            let generics = generics(db.upcast(), adt.into());
+            let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
+            Binders::new(substs.len(), Ty::apply(TypeCtor::Adt(adt), substs))
+        }
         TyDefId::TypeAliasId(it) => {
             let typ = db.type_alias_type(it);
             instantiate_outside_inference(db, it.into(), &typ)

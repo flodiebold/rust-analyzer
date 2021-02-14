@@ -65,6 +65,9 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::invoke(crate::callable_item_sig)]
     fn callable_item_signature(&self, def: CallableDefId) -> PolyFnSig;
 
+    #[salsa::invoke(crate::hir::callable_item_signature_query)]
+    fn callable_item_signature_2(&self, def: CallableDefId) -> crate::hir::FnSig;
+
     #[salsa::invoke(crate::lower::return_type_impl_traits)]
     fn return_type_impl_traits(
         &self,
