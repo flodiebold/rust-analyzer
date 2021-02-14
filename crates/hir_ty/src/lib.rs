@@ -536,6 +536,10 @@ impl<T> Binders<T> {
     pub fn filter_map<U>(self, f: impl FnOnce(T) -> Option<U>) -> Option<Binders<U>> {
         Some(Binders { num_binders: self.num_binders, value: f(self.value)? })
     }
+
+    pub fn truncate_vars(self, num_binders: usize) -> Self {
+        Binders { num_binders, value: self.value }
+    }
 }
 
 impl<T: Clone> Binders<&T> {

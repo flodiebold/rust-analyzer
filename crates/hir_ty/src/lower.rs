@@ -953,38 +953,12 @@ pub(crate) fn generic_defaults_query(
     db: &dyn HirDatabase,
     def: GenericDefId,
 ) -> Arc<[Binders<Ty>]> {
-    let resolver = def.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let generic_params = generics(db.upcast(), def);
-
-    let defaults = generic_params
+    let defaults = db.generic_defaults_2(def);
+    defaults
         .iter()
         .enumerate()
-        .map(|(idx, (_, p))| {
-            let mut ty = p.default.as_ref().map_or(Ty::Unknown, |t| Ty::from_hir(&ctx, t));
-
-            // Each default can only refer to previous parameters.
-            ty.walk_mut_binders(
-                &mut |ty, binders| match ty {
-                    Ty::Bound(BoundVar { debruijn, index }) if *debruijn == binders => {
-                        if *index >= idx {
-                            // type variable default referring to parameter coming
-                            // after it. This is forbidden (FIXME: report
-                            // diagnostic)
-                            *ty = Ty::Unknown;
-                        }
-                    }
-                    _ => {}
-                },
-                DebruijnIndex::INNERMOST,
-            );
-
-            Binders::new(idx, ty)
-        })
-        .collect();
-
-    defaults
+        .map(|(i, t)| instantiate_outside_inference(db, def.into(), t).truncate_vars(i))
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
