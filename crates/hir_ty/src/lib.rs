@@ -1043,7 +1043,7 @@ pub trait TypeWalk {
         self.walk_mut_binders(
             &mut |ty, binders| {
                 if let &mut Ty::Bound(bound) = ty {
-                    if bound.debruijn >= binders {
+                    if bound.debruijn == binders {
                         *ty = substs.0[bound.index].clone().shift_bound_vars(binders);
                     }
                 }
@@ -1062,6 +1062,22 @@ pub trait TypeWalk {
             &mut |ty, binders| match ty {
                 Ty::Bound(bound) if bound.debruijn >= binders => {
                     Ty::Bound(bound.shifted_in_from(n))
+                }
+                ty => ty,
+            },
+            DebruijnIndex::INNERMOST,
+        )
+    }
+
+    /// Shifts up debruijn indices of `Ty::Bound` vars by `n`.
+    fn shift_bound_vars_out(self, n: DebruijnIndex) -> Self
+    where
+        Self: Sized,
+    {
+        self.fold_binders(
+            &mut |ty, binders| match ty {
+                Ty::Bound(bound) if bound.debruijn >= binders => {
+                    Ty::Bound(bound.shifted_out_to(n).unwrap())
                 }
                 ty => ty,
             },

@@ -366,6 +366,21 @@ impl Instantiate for crate::hir::FnSig {
     }
 }
 
+impl Instantiate for TraitBound {
+    type InstantiatedType = Binders<TraitRef>;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        ctx.shift.shift_in();
+        let trait_ref = ctx
+            .instantiate_trait_bound(self, Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0)));
+        ctx.shift.shift_out();
+        Binders::new(1, trait_ref)
+    }
+}
+
 impl<T: Instantiate> Instantiate for &[T] {
     type InstantiatedType = Vec<T::InstantiatedType>;
 
@@ -374,6 +389,17 @@ impl<T: Instantiate> Instantiate for &[T] {
         ctx: &mut InstantiateContext<'a, 'b>,
     ) -> Self::InstantiatedType {
         self.iter().map(|t| ctx.instantiate(t)).collect()
+    }
+}
+
+impl<T: Instantiate, U: Instantiate> Instantiate for (T, U) {
+    type InstantiatedType = (T::InstantiatedType, U::InstantiatedType);
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        (ctx.instantiate(&self.0), ctx.instantiate(&self.1))
     }
 }
 

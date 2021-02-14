@@ -635,18 +635,6 @@ impl TraitRef {
         TraitRef { trait_: resolved, substs }
     }
 
-    fn from_hir(
-        ctx: &TyLoweringContext<'_>,
-        type_ref: &TypeRef,
-        explicit_self_ty: Option<Ty>,
-    ) -> Option<Self> {
-        let path = match type_ref {
-            TypeRef::Path(path) => path,
-            _ => return None,
-        };
-        TraitRef::from_path(ctx, path, explicit_self_ty)
-    }
-
     fn substs_from_path(
         ctx: &TyLoweringContext<'_>,
         segment: PathSegment<'_>,
@@ -1075,16 +1063,16 @@ pub(crate) fn impl_self_ty_query(db: &dyn HirDatabase, impl_id: ImplId) -> Binde
 }
 
 pub(crate) fn impl_trait_query(db: &dyn HirDatabase, impl_id: ImplId) -> Option<Binders<TraitRef>> {
-    let impl_data = db.impl_data(impl_id);
-    let resolver = impl_id.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let self_ty = db.impl_self_ty(impl_id);
-    let target_trait = impl_data.target_trait.as_ref()?;
-    Some(Binders::new(
-        self_ty.num_binders,
-        TraitRef::from_hir(&ctx, target_trait, Some(self_ty.value))?,
-    ))
+    let impl_trait = db.impl_trait_2(impl_id)?;
+    let self_type = db.impl_self_type(impl_id);
+    let trait_ref = instantiate_outside_inference(db, impl_id.into(), &(impl_trait, self_type))
+        .map(|(bound, self_ty)| {
+            // FIXME: I believe this shiftiness should go away when we're using Chalk's types
+            bound
+                .subst(&Substs::single(self_ty.shift_bound_vars(DebruijnIndex::ONE)))
+                .shift_bound_vars_out(DebruijnIndex::ONE)
+        });
+    Some(trait_ref)
 }
 
 pub(crate) fn return_type_impl_traits(
