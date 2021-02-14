@@ -747,7 +747,7 @@ pub fn callable_item_sig(db: &dyn HirDatabase, def: CallableDefId) -> PolyFnSig 
     instantiate_outside_inference(db, def.into(), &sig)
 }
 
-pub fn associated_type_shorthand_candidates<R>(
+fn associated_type_shorthand_candidates<R>(
     db: &dyn HirDatabase,
     res: TypeNs,
     mut cb: impl FnMut(&Name, &TraitRef, TypeAliasId) -> Option<R>,

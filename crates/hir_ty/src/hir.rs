@@ -406,6 +406,7 @@ pub struct LoweredFn {
     pub impl_traits: Arc<[smallvec::SmallVec<[Bound; 1]>]>,
 }
 
+pub use lower::associated_type_shorthand_candidates;
 pub(crate) use lower::{
     callable_item_signature_query, const_type_query, field_types_query, function_signature_query,
     generic_bounds_for_param_query, generic_bounds_for_param_recover, generic_bounds_query,

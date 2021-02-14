@@ -44,10 +44,11 @@ use crate::{
 };
 
 pub use autoderef::autoderef;
+pub use hir::associated_type_shorthand_candidates;
 pub use infer::{InferTy, InferenceResult};
 pub use lower::{
-    associated_type_shorthand_candidates, callable_item_sig, CallableDefId, ImplTraitLoweringMode,
-    TyDefId, TyLoweringContext, ValueTyDefId,
+    callable_item_sig, CallableDefId, ImplTraitLoweringMode, TyDefId, TyLoweringContext,
+    ValueTyDefId,
 };
 pub use traits::{InEnvironment, Obligation, ProjectionPredicate, TraitEnvironment};
 
