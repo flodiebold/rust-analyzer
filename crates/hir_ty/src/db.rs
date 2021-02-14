@@ -10,7 +10,7 @@ use hir_def::{
 use la_arena::ArenaMap;
 
 use crate::{
-    hir::{Bound, TraitBound, Type},
+    hir::{Bound, TraitBound, Type, WhereClause},
     method_resolution::{InherentImpls, TraitImpls},
     traits::chalk,
     Binders, CallableDefId, GenericPredicate, InferenceResult, OpaqueTyId, PolyFnSig,
@@ -87,6 +87,9 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
 
     #[salsa::invoke(crate::lower::generic_predicates_query)]
     fn generic_predicates(&self, def: GenericDefId) -> Arc<[Binders<GenericPredicate>]>;
+
+    #[salsa::invoke(crate::hir::generic_bounds_query)]
+    fn generic_bounds(&self, def: GenericDefId) -> Arc<[WhereClause]>;
 
     #[salsa::invoke(crate::lower::generic_defaults_query)]
     fn generic_defaults(&self, def: GenericDefId) -> Arc<[Binders<Ty>]>;

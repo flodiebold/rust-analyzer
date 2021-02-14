@@ -24,7 +24,7 @@ use test_utils::mark;
 
 use super::{
     substitute, ApplicationType, AssocTypeBinding, Bound, HirTypeWalk, OpaqueType, ProjectionType,
-    TraitBound, Type, TypeArgs, TypeName,
+    TraitBound, Type, TypeArgs, TypeName, WhereClause,
 };
 use super::{FnSig, LoweredFn};
 use crate::{
@@ -785,6 +785,37 @@ pub(crate) fn generic_bounds_for_param_recover(
 ) -> Arc<[Bound]> {
     // FIXME report cycle error
     Arc::new([])
+}
+
+pub(crate) fn generic_bounds_query(db: &dyn HirDatabase, def: GenericDefId) -> Arc<[WhereClause]> {
+    let resolver = def.resolver(db.upcast());
+    let ctx = Context::new(db, &resolver);
+    let generics = generics(db.upcast(), def);
+    let mut acc = Vec::new();
+    let lower_target = |target: &WherePredicateTypeTarget| match target {
+        WherePredicateTypeTarget::TypeRef(type_ref) => ctx.lower_type(type_ref),
+        WherePredicateTypeTarget::TypeParam(local_id) => {
+            Type::Param(TypeParamId { parent: def, local_id: *local_id })
+        }
+    };
+    for pred in resolver.where_predicates_in_scope() {
+        match pred {
+            WherePredicate::TypeBound { target, bound } => {
+                let ty = lower_target(target);
+                ctx.lower_bound(&bound)
+                    .into_iter()
+                    .for_each(|bound| acc.push(WhereClause { bound, ty: ty.clone() }));
+            }
+            WherePredicate::Lifetime { target, bound } => {}
+            WherePredicate::ForLifetime { lifetimes, target, bound } => {
+                let ty = lower_target(target);
+                ctx.lower_bound(&bound)
+                    .into_iter()
+                    .for_each(|bound| acc.push(WhereClause { bound, ty: ty.clone() }));
+            }
+        }
+    }
+    acc.into()
 }
 
 pub(crate) fn generic_defaults_query(db: &dyn HirDatabase, def: GenericDefId) -> Arc<[Type]> {

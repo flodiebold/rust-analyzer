@@ -935,17 +935,8 @@ pub(crate) fn generic_predicates_query(
     db: &dyn HirDatabase,
     def: GenericDefId,
 ) -> Arc<[Binders<GenericPredicate>]> {
-    let resolver = def.resolver(db.upcast());
-    let ctx =
-        TyLoweringContext::new(db, &resolver).with_type_param_mode(TypeParamLoweringMode::Variable);
-    let generics = generics(db.upcast(), def);
-    resolver
-        .where_predicates_in_scope()
-        .flat_map(|pred| {
-            GenericPredicate::from_where_predicate(&ctx, pred)
-                .map(|p| Binders::new(generics.len(), p))
-        })
-        .collect()
+    let bounds = db.generic_bounds(def);
+    bounds.iter().map(|b| instantiate_outside_inference(db, def, b)).collect()
 }
 
 /// Resolve the default type params from generics

@@ -5,7 +5,7 @@
 /// surrounding context.
 use crate::{
     db::HirDatabase,
-    hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName},
+    hir::{AssocTypeBinding, Bound, TraitBound, Type, TypeArgs, TypeName, WhereClause},
     utils::generics,
     ApplicationTy, Binders, GenericPredicate, Obligation, OpaqueTy, ProjectionPredicate,
     ProjectionTy, Substs, TraitRef, Ty, TypeCtor, TypeWalk, ValueTyDefId,
@@ -378,6 +378,18 @@ impl Instantiate for TraitBound {
             .instantiate_trait_bound(self, Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0)));
         ctx.shift.shift_out();
         Binders::new(1, trait_ref)
+    }
+}
+
+impl Instantiate for WhereClause {
+    type InstantiatedType = GenericPredicate;
+
+    fn do_instantiate<'a, 'b>(
+        &self,
+        ctx: &mut InstantiateContext<'a, 'b>,
+    ) -> Self::InstantiatedType {
+        let self_ty = ctx.instantiate(&self.ty);
+        ctx.instantiate_bound(&self.bound, self_ty)
     }
 }
 
