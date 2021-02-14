@@ -14,9 +14,9 @@ use hir_def::{
     path::{GenericArg, Path, PathSegment, PathSegments},
     resolver::{Resolver, TypeNs},
     type_ref::{TypeBound, TypeRef},
-    AdtId, AssocContainerId, AssocItemId, ConstId, EnumId, EnumVariantId, FunctionId, GenericDefId,
-    HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId, TraitId, TypeAliasId, TypeParamId,
-    UnionId, VariantId,
+    AdtId, AssocContainerId, AssocItemId, ConstId, ConstParamId, EnumId, EnumVariantId, FunctionId,
+    GenericDefId, HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId, TraitId,
+    TypeAliasId, TypeParamId, UnionId, VariantId,
 };
 use hir_expand::name::Name;
 use la_arena::ArenaMap;
@@ -1025,4 +1025,9 @@ pub(crate) fn return_type_impl_traits(
             .collect();
         Some(Arc::new(Binders::new(num_binders, ReturnTypeImplTraits { impl_traits })))
     }
+}
+
+pub(crate) fn const_param_ty_query(db: &dyn HirDatabase, def: ConstParamId) -> Binders<Ty> {
+    let typ = db.const_param_type(def);
+    instantiate_outside_inference(db, def.parent.into(), &typ)
 }

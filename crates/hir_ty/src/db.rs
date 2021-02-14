@@ -44,6 +44,9 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
     #[salsa::invoke(crate::hir::lower::const_param_type_query)]
     fn const_param_type(&self, def: ConstParamId) -> Type;
 
+    #[salsa::invoke(crate::lower::const_param_ty_query)]
+    fn const_param_ty(&self, def: ConstParamId) -> Binders<Ty>;
+
     #[salsa::invoke(crate::hir::const_type_query)]
     fn const_type(&self, def: ConstId) -> Type;
 
