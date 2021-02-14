@@ -37,10 +37,11 @@ impl<'a> InferenceContext<'a> {
                 // This can't actually happen syntax-wise
                 return None;
             }
-            let ty = self.make_ty(type_ref);
             let remaining_segments_for_ty = path.segments().take(path.segments().len() - 1);
-            let ctx = crate::lower::TyLoweringContext::new(self.db, &resolver);
-            let (ty, _) = Ty::from_type_relative_path(&ctx, ty, None, remaining_segments_for_ty);
+            let ctx = crate::hir::lower::Context::new(self.db, &resolver);
+            let typ = ctx.lower_type(type_ref);
+            let (typ, _) = ctx.lower_type_relative_path(typ, None, remaining_segments_for_ty);
+            let ty = self.instantiate_ctx_local().instantiate(&typ);
             self.resolve_ty_assoc_item(
                 ty,
                 &path.segments().last().expect("path had at least one segment").name,
@@ -125,8 +126,12 @@ impl<'a> InferenceContext<'a> {
             (TypeNs::TraitId(trait_), true) => {
                 let segment =
                     remaining_segments.last().expect("there should be at least one segment here");
-                let ctx = crate::lower::TyLoweringContext::new(self.db, &self.resolver);
-                let trait_ref = TraitRef::from_resolved_path(&ctx, trait_, resolved_segment, None);
+                let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
+                let (trait_bound, self_type) =
+                    ctx.lower_resolved_path_to_trait_bound_and_self_type(trait_, &resolved_segment);
+                let self_ty = self.instantiate_ctx_local().instantiate(&self_type);
+                let trait_ref =
+                    self.instantiate_ctx_local().instantiate_trait_bound(&trait_bound, self_ty);
                 self.resolve_trait_assoc_item(trait_ref, segment, id)
             }
             (def, _) => {
@@ -136,14 +141,14 @@ impl<'a> InferenceContext<'a> {
                 // as Iterator>::Item::default`)
                 let remaining_segments_for_ty =
                     remaining_segments.take(remaining_segments.len() - 1);
-                let ctx = crate::lower::TyLoweringContext::new(self.db, &self.resolver);
-                let (ty, _) = Ty::from_partly_resolved_hir_path(
-                    &ctx,
+                let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
+                let (typ, _) = ctx.lower_partly_resolved_hir_path(
                     def,
                     resolved_segment,
                     remaining_segments_for_ty,
                     true,
                 );
+                let ty = self.instantiate_ctx_local().instantiate(&typ);
                 if let Ty::Unknown = ty {
                     return None;
                 }

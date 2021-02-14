@@ -530,6 +530,19 @@ impl<'a> Context<'a> {
         result
     }
 
+    pub fn lower_resolved_path_to_trait_bound_and_self_type(
+        &self,
+        trait_: TraitId,
+        segment: &PathSegment,
+    ) -> (TraitBound, Type) {
+        let arguments_with_self =
+            self.args_from_path_segment(segment.clone(), trait_.into(), false, true);
+        let self_type = arguments_with_self[0].clone();
+        let arguments = TypeArgs(arguments_with_self[1..].to_vec().into());
+        let trait_bound = TraitBound { trait_, arguments };
+        (trait_bound, self_type)
+    }
+
     fn lower_assoc_type_bindings(
         &self,
         trait_bound: &TraitBound,

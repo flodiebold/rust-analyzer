@@ -273,7 +273,7 @@ impl Ty {
         (ty, res)
     }
 
-    pub(crate) fn from_type_relative_path(
+    fn from_type_relative_path(
         ctx: &TyLoweringContext<'_>,
         ty: Ty,
         // We need the original resolution to lower `Self::AssocTy` correctly
@@ -596,7 +596,7 @@ impl TraitRef {
         Some(TraitRef::from_resolved_path(ctx, resolved, segment, explicit_self_ty))
     }
 
-    pub(crate) fn from_resolved_path(
+    fn from_resolved_path(
         ctx: &TyLoweringContext<'_>,
         resolved: TraitId,
         segment: PathSegment<'_>,

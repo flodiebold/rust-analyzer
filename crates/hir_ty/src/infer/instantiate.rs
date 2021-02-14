@@ -220,7 +220,7 @@ impl<'a, 'b> InstantiateContext<'a, 'b> {
         }
     }
 
-    fn instantiate_trait_bound(&mut self, trait_bound: &TraitBound, self_ty: Ty) -> TraitRef {
+    pub fn instantiate_trait_bound(&mut self, trait_bound: &TraitBound, self_ty: Ty) -> TraitRef {
         let substs = Substs::build_for_def(self.db, trait_bound.trait_)
             .push(self_ty)
             .fill_exact(trait_bound.arguments.iter().map(|typ| self.instantiate(typ)))
