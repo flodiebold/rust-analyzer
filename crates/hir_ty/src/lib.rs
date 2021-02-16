@@ -46,10 +46,7 @@ use crate::{
 pub use autoderef::autoderef;
 pub use hir::associated_type_shorthand_candidates;
 pub use infer::{InferTy, InferenceResult};
-pub use lower::{
-    callable_item_sig, CallableDefId, ImplTraitLoweringMode, TyDefId, TyLoweringContext,
-    ValueTyDefId,
-};
+pub use lower::{callable_item_sig, CallableDefId, TyDefId, TyLoweringContext, ValueTyDefId};
 pub use traits::{InEnvironment, Obligation, ProjectionPredicate, TraitEnvironment};
 
 pub use chalk_ir::{BoundVar, DebruijnIndex};

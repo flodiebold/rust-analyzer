@@ -30,9 +30,9 @@ use crate::{
         all_super_trait_refs, associated_type_by_name_including_super_traits, generics,
         make_mut_slice,
     },
-    Binders, BoundVar, DebruijnIndex, GenericPredicate, OpaqueTy, OpaqueTyId, PolyFnSig,
-    ProjectionPredicate, ProjectionTy, ReturnTypeImplTrait, ReturnTypeImplTraits, Substs,
-    TraitEnvironment, TraitRef, Ty, TypeCtor, TypeWalk,
+    Binders, BoundVar, DebruijnIndex, GenericPredicate, PolyFnSig, ProjectionPredicate,
+    ProjectionTy, ReturnTypeImplTrait, ReturnTypeImplTraits, Substs, TraitEnvironment, TraitRef,
+    Ty, TypeCtor, TypeWalk,
 };
 
 #[derive(Debug)]
@@ -45,35 +45,13 @@ pub struct TyLoweringContext<'a> {
     /// should be converted to variables. I think in practice, this isn't
     /// possible currently, so this should be fine for now.
     pub type_param_mode: TypeParamLoweringMode,
-    pub impl_trait_mode: ImplTraitLoweringMode,
-    impl_trait_counter: std::cell::Cell<u16>,
-    /// When turning `impl Trait` into opaque types, we have to collect the
-    /// bounds at the same time to get the IDs correct (without becoming too
-    /// complicated). I don't like using interior mutability (as for the
-    /// counter), but I've tried and failed to make the lifetimes work for
-    /// passing around a `&mut TyLoweringContext`. The core problem is that
-    /// we're grouping the mutable data (the counter and this field) together
-    /// with the immutable context (the references to the DB and resolver).
-    /// Splitting this up would be a possible fix.
-    opaque_type_data: std::cell::RefCell<Vec<ReturnTypeImplTrait>>,
 }
 
 impl<'a> TyLoweringContext<'a> {
     pub fn new(db: &'a dyn HirDatabase, resolver: &'a Resolver) -> Self {
-        let impl_trait_counter = std::cell::Cell::new(0);
-        let impl_trait_mode = ImplTraitLoweringMode::Disallowed;
         let type_param_mode = TypeParamLoweringMode::Placeholder;
         let in_binders = DebruijnIndex::INNERMOST;
-        let opaque_type_data = std::cell::RefCell::new(Vec::new());
-        Self {
-            db,
-            resolver,
-            in_binders,
-            impl_trait_mode,
-            impl_trait_counter,
-            type_param_mode,
-            opaque_type_data,
-        }
+        Self { db, resolver, in_binders, type_param_mode }
     }
 
     pub fn with_debruijn<T>(
@@ -81,16 +59,8 @@ impl<'a> TyLoweringContext<'a> {
         debruijn: DebruijnIndex,
         f: impl FnOnce(&TyLoweringContext) -> T,
     ) -> T {
-        let opaque_ty_data_vec = self.opaque_type_data.replace(Vec::new());
-        let new_ctx = Self {
-            in_binders: debruijn,
-            impl_trait_counter: std::cell::Cell::new(self.impl_trait_counter.get()),
-            opaque_type_data: std::cell::RefCell::new(opaque_ty_data_vec),
-            ..*self
-        };
+        let new_ctx = Self { in_binders: debruijn, ..*self };
         let result = f(&new_ctx);
-        self.impl_trait_counter.set(new_ctx.impl_trait_counter.get());
-        self.opaque_type_data.replace(new_ctx.opaque_type_data.into_inner());
         result
     }
 
@@ -102,33 +72,9 @@ impl<'a> TyLoweringContext<'a> {
         self.with_debruijn(self.in_binders.shifted_in_from(debruijn), f)
     }
 
-    pub fn with_impl_trait_mode(self, impl_trait_mode: ImplTraitLoweringMode) -> Self {
-        Self { impl_trait_mode, ..self }
-    }
-
     pub fn with_type_param_mode(self, type_param_mode: TypeParamLoweringMode) -> Self {
         Self { type_param_mode, ..self }
     }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ImplTraitLoweringMode {
-    /// `impl Trait` gets lowered into an opaque type that doesn't unify with
-    /// anything except itself. This is used in places where values flow 'out',
-    /// i.e. for arguments of the function we're currently checking, and return
-    /// types of functions we're calling.
-    Opaque,
-    /// `impl Trait` gets lowered into a type variable. Used for argument
-    /// position impl Trait when inside the respective function, since it allows
-    /// us to support that without Chalk.
-    Param,
-    /// `impl Trait` gets lowered into a variable that can unify with some
-    /// type. This is used in places where values flow 'in', i.e. for arguments
-    /// of functions we're calling, and the return type of the function we're
-    /// currently checking.
-    Variable,
-    /// `impl Trait` is disallowed and will be an error.
-    Disallowed,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -191,83 +137,7 @@ impl Ty {
                 });
                 Ty::Dyn(predicates)
             }
-            TypeRef::ImplTrait(bounds) => {
-                match ctx.impl_trait_mode {
-                    ImplTraitLoweringMode::Opaque => {
-                        let idx = ctx.impl_trait_counter.get();
-                        ctx.impl_trait_counter.set(idx + 1);
-
-                        assert!(idx as usize == ctx.opaque_type_data.borrow().len());
-                        // this dance is to make sure the data is in the right
-                        // place even if we encounter more opaque types while
-                        // lowering the bounds
-                        ctx.opaque_type_data
-                            .borrow_mut()
-                            .push(ReturnTypeImplTrait { bounds: Binders::new(1, Vec::new()) });
-                        // We don't want to lower the bounds inside the binders
-                        // we're currently in, because they don't end up inside
-                        // those binders. E.g. when we have `impl Trait<impl
-                        // OtherTrait<T>>`, the `impl OtherTrait<T>` can't refer
-                        // to the self parameter from `impl Trait`, and the
-                        // bounds aren't actually stored nested within each
-                        // other, but separately. So if the `T` refers to a type
-                        // parameter of the outer function, it's just one binder
-                        // away instead of two.
-                        let actual_opaque_type_data = ctx
-                            .with_debruijn(DebruijnIndex::INNERMOST, |ctx| {
-                                ReturnTypeImplTrait::from_hir(ctx, &bounds)
-                            });
-                        ctx.opaque_type_data.borrow_mut()[idx as usize] = actual_opaque_type_data;
-
-                        let func = match ctx.resolver.generic_def() {
-                            Some(GenericDefId::FunctionId(f)) => f,
-                            _ => panic!("opaque impl trait lowering in non-function"),
-                        };
-                        let impl_trait_id = OpaqueTyId::ReturnTypeImplTrait(func, idx);
-                        let generics = generics(ctx.db.upcast(), func.into());
-                        let parameters = Substs::bound_vars(&generics, ctx.in_binders);
-                        Ty::Opaque(OpaqueTy { opaque_ty_id: impl_trait_id, parameters })
-                    }
-                    ImplTraitLoweringMode::Param => {
-                        let idx = ctx.impl_trait_counter.get();
-                        // FIXME we're probably doing something wrong here
-                        ctx.impl_trait_counter.set(idx + count_impl_traits(type_ref) as u16);
-                        if let Some(def) = ctx.resolver.generic_def() {
-                            let generics = generics(ctx.db.upcast(), def);
-                            let param = generics
-                                .iter()
-                                .filter(|(_, data)| {
-                                    data.provenance == TypeParamProvenance::ArgumentImplTrait
-                                })
-                                .nth(idx as usize)
-                                .map_or(Ty::Unknown, |(id, _)| Ty::Placeholder(id));
-                            param
-                        } else {
-                            Ty::Unknown
-                        }
-                    }
-                    ImplTraitLoweringMode::Variable => {
-                        let idx = ctx.impl_trait_counter.get();
-                        // FIXME we're probably doing something wrong here
-                        ctx.impl_trait_counter.set(idx + count_impl_traits(type_ref) as u16);
-                        let (parent_params, self_params, list_params, _impl_trait_params) =
-                            if let Some(def) = ctx.resolver.generic_def() {
-                                let generics = generics(ctx.db.upcast(), def);
-                                generics.provenance_split()
-                            } else {
-                                (0, 0, 0, 0)
-                            };
-                        Ty::Bound(BoundVar::new(
-                            ctx.in_binders,
-                            idx as usize + parent_params + self_params + list_params,
-                        ))
-                    }
-                    ImplTraitLoweringMode::Disallowed => {
-                        // FIXME: report error
-                        Ty::Unknown
-                    }
-                }
-            }
+            TypeRef::ImplTrait(_) => Ty::Unknown,
             TypeRef::Error => Ty::Unknown,
         };
         (ty, res)
@@ -716,29 +586,6 @@ fn assoc_type_bindings_from_type_bound<'a>(
             }
             preds
         })
-}
-
-impl ReturnTypeImplTrait {
-    fn from_hir(ctx: &TyLoweringContext, bounds: &[TypeBound]) -> Self {
-        let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
-        let predicates = ctx.with_shifted_in(DebruijnIndex::ONE, |ctx| {
-            bounds
-                .iter()
-                .flat_map(|b| GenericPredicate::from_type_bound(ctx, b, self_ty.clone()))
-                .collect()
-        });
-        ReturnTypeImplTrait { bounds: Binders::new(1, predicates) }
-    }
-}
-
-fn count_impl_traits(type_ref: &TypeRef) -> usize {
-    let mut count = 0;
-    type_ref.walk(&mut |type_ref| {
-        if matches!(type_ref, TypeRef::ImplTrait(_)) {
-            count += 1;
-        }
-    });
-    count
 }
 
 /// Build the signature of a callable item (function, struct or enum variant).

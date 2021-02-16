@@ -40,9 +40,7 @@ use super::{
     traits::{Guidance, Obligation, ProjectionPredicate, Solution},
     InEnvironment, ProjectionTy, Substs, TraitEnvironment, TraitRef, Ty, TypeCtor, TypeWalk,
 };
-use crate::{
-    db::HirDatabase, infer::diagnostics::InferenceDiagnostic, lower::ImplTraitLoweringMode,
-};
+use crate::{db::HirDatabase, infer::diagnostics::InferenceDiagnostic};
 
 pub(crate) use instantiate::{instantiate_ctor, instantiate_outside_inference};
 pub(crate) use unify::unify;
@@ -290,21 +288,12 @@ impl<'a> InferenceContext<'a> {
         self.result.diagnostics.push(diagnostic);
     }
 
-    fn make_ty_with_mode(
-        &mut self,
-        type_ref: &TypeRef,
-        _impl_trait_mode: ImplTraitLoweringMode,
-    ) -> Ty {
+    fn make_ty(&mut self, type_ref: &TypeRef) -> Ty {
         // FIXME use right resolver for block
         let ctx = crate::hir::lower::Context::new(self.db, &self.resolver);
         let typ = ctx.lower_type(type_ref);
         let ty = self.instantiate_ctx_local().instantiate(&typ);
         ty
-    }
-
-    // FIXME all instances of this should be using a `Type` obtained from some query (i.e. lowering should happen outside of inference)
-    fn make_ty(&mut self, type_ref: &TypeRef) -> Ty {
-        self.make_ty_with_mode(type_ref, ImplTraitLoweringMode::Disallowed)
     }
 
     /// Replaces Ty::Unknown by a new type var, so we can maybe still infer it.
