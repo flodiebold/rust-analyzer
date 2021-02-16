@@ -40,18 +40,12 @@ pub struct TyLoweringContext<'a> {
     pub db: &'a dyn HirDatabase,
     pub resolver: &'a Resolver,
     in_binders: DebruijnIndex,
-    /// Note: Conceptually, it's thinkable that we could be in a location where
-    /// some type params should be represented as placeholders, and others
-    /// should be converted to variables. I think in practice, this isn't
-    /// possible currently, so this should be fine for now.
-    pub type_param_mode: TypeParamLoweringMode,
 }
 
 impl<'a> TyLoweringContext<'a> {
     pub fn new(db: &'a dyn HirDatabase, resolver: &'a Resolver) -> Self {
-        let type_param_mode = TypeParamLoweringMode::Placeholder;
         let in_binders = DebruijnIndex::INNERMOST;
-        Self { db, resolver, in_binders, type_param_mode }
+        Self { db, resolver, in_binders }
     }
 
     pub fn with_debruijn<T>(
@@ -71,16 +65,6 @@ impl<'a> TyLoweringContext<'a> {
     ) -> T {
         self.with_debruijn(self.in_binders.shifted_in_from(debruijn), f)
     }
-
-    pub fn with_type_param_mode(self, type_param_mode: TypeParamLoweringMode) -> Self {
-        Self { type_param_mode, ..self }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum TypeParamLoweringMode {
-    Placeholder,
-    Variable,
 }
 
 impl Ty {
@@ -207,41 +191,15 @@ impl Ty {
                 };
                 return (ty, None);
             }
-            TypeNs::GenericParam(param_id) => {
-                let generics = generics(
-                    ctx.db.upcast(),
-                    ctx.resolver.generic_def().expect("generics in scope"),
-                );
-                match ctx.type_param_mode {
-                    TypeParamLoweringMode::Placeholder => Ty::Placeholder(param_id),
-                    TypeParamLoweringMode::Variable => {
-                        let idx = generics.param_idx(param_id).expect("matching generics");
-                        Ty::Bound(BoundVar::new(ctx.in_binders, idx))
-                    }
-                }
-            }
+            TypeNs::GenericParam(param_id) => Ty::Placeholder(param_id),
             TypeNs::SelfType(impl_id) => {
                 let generics = generics(ctx.db.upcast(), impl_id.into());
-                let substs = match ctx.type_param_mode {
-                    TypeParamLoweringMode::Placeholder => {
-                        Substs::type_params_for_generics(&generics)
-                    }
-                    TypeParamLoweringMode::Variable => {
-                        Substs::bound_vars(&generics, ctx.in_binders)
-                    }
-                };
+                let substs = Substs::type_params_for_generics(&generics);
                 ctx.db.impl_self_ty(impl_id).subst(&substs)
             }
             TypeNs::AdtSelfType(adt) => {
                 let generics = generics(ctx.db.upcast(), adt.into());
-                let substs = match ctx.type_param_mode {
-                    TypeParamLoweringMode::Placeholder => {
-                        Substs::type_params_for_generics(&generics)
-                    }
-                    TypeParamLoweringMode::Variable => {
-                        Substs::bound_vars(&generics, ctx.in_binders)
-                    }
-                };
+                let substs = Substs::type_params_for_generics(&generics);
                 ctx.db.ty(adt.into()).subst(&substs)
             }
 
@@ -297,19 +255,16 @@ impl Ty {
             let ty =
                 associated_type_shorthand_candidates(ctx.db, res, move |name, t, associated_ty| {
                     if name == segment.name {
-                        let substs = match ctx.type_param_mode {
-                            TypeParamLoweringMode::Placeholder => {
-                                // if we're lowering to placeholders, we have to put
-                                // them in now
-                                let s = Substs::type_params(
-                                    ctx.db,
-                                    ctx.resolver.generic_def().expect(
-                                        "there should be generics if there's a generic param",
-                                    ),
-                                );
-                                t.substs.clone().subst_bound_vars(&s)
-                            }
-                            TypeParamLoweringMode::Variable => t.substs.clone(),
+                        let substs = {
+                            // if we're lowering to placeholders, we have to put
+                            // them in now
+                            let s = Substs::type_params(
+                                ctx.db,
+                                ctx.resolver
+                                    .generic_def()
+                                    .expect("there should be generics if there's a generic param"),
+                            );
+                            t.substs.clone().subst_bound_vars(&s)
                         };
                         // We need to shift in the bound vars, since
                         // associated_type_shorthand_candidates does not do that
@@ -500,16 +455,9 @@ impl GenericPredicate {
                     WherePredicateTypeTarget::TypeRef(type_ref) => Ty::from_hir(ctx, type_ref),
                     WherePredicateTypeTarget::TypeParam(param_id) => {
                         let generic_def = ctx.resolver.generic_def().expect("generics in scope");
-                        let generics = generics(ctx.db.upcast(), generic_def);
                         let param_id =
                             hir_def::TypeParamId { parent: generic_def, local_id: *param_id };
-                        match ctx.type_param_mode {
-                            TypeParamLoweringMode::Placeholder => Ty::Placeholder(param_id),
-                            TypeParamLoweringMode::Variable => {
-                                let idx = generics.param_idx(param_id).expect("matching generics");
-                                Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, idx))
-                            }
-                        }
+                        Ty::Placeholder(param_id)
                     }
                 };
                 GenericPredicate::from_type_bound(ctx, bound, self_ty)
@@ -696,8 +644,7 @@ pub(crate) fn generic_predicates_for_param_query(
 
 impl TraitEnvironment {
     pub fn lower(db: &dyn HirDatabase, resolver: &Resolver) -> Arc<TraitEnvironment> {
-        let ctx = TyLoweringContext::new(db, &resolver)
-            .with_type_param_mode(TypeParamLoweringMode::Placeholder);
+        let ctx = TyLoweringContext::new(db, &resolver);
         let mut predicates = resolver
             .where_predicates_in_scope()
             .flat_map(|pred| GenericPredicate::from_where_predicate(&ctx, pred))
