@@ -42,7 +42,7 @@ use super::{
 };
 use crate::{db::HirDatabase, infer::diagnostics::InferenceDiagnostic};
 
-pub(crate) use instantiate::{instantiate_ctor, instantiate_outside_inference};
+pub(crate) use instantiate::{instantiate_ctor, instantiate_outside_inference, instantiate_outside_inference_local};
 pub(crate) use unify::unify;
 
 macro_rules! ty_app {

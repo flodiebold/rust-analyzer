@@ -25,7 +25,7 @@ use stdx::{always, impl_from};
 
 use crate::{
     db::HirDatabase,
-    infer::instantiate_outside_inference,
+    infer::{instantiate_outside_inference, instantiate_outside_inference_local},
     utils::{
         all_super_trait_refs, associated_type_by_name_including_super_traits, generics,
         make_mut_slice,
@@ -69,62 +69,9 @@ impl<'a> TyLoweringContext<'a> {
 
 impl Ty {
     pub fn from_hir(ctx: &TyLoweringContext<'_>, type_ref: &TypeRef) -> Self {
-        Ty::from_hir_ext(ctx, type_ref).0
-    }
-    pub fn from_hir_ext(ctx: &TyLoweringContext<'_>, type_ref: &TypeRef) -> (Self, Option<TypeNs>) {
-        let mut res = None;
-        let ty = match type_ref {
-            TypeRef::Never => Ty::simple(TypeCtor::Never),
-            TypeRef::Tuple(inner) => {
-                let inner_tys: Arc<[Ty]> = inner.iter().map(|tr| Ty::from_hir(ctx, tr)).collect();
-                Ty::apply(
-                    TypeCtor::Tuple { cardinality: inner_tys.len() as u16 },
-                    Substs(inner_tys),
-                )
-            }
-            TypeRef::Path(path) => {
-                let (ty, res_) = Ty::from_hir_path(ctx, path);
-                res = res_;
-                ty
-            }
-            TypeRef::RawPtr(inner, mutability) => {
-                let inner_ty = Ty::from_hir(ctx, inner);
-                Ty::apply_one(TypeCtor::RawPtr(*mutability), inner_ty)
-            }
-            TypeRef::Array(inner) => {
-                let inner_ty = Ty::from_hir(ctx, inner);
-                Ty::apply_one(TypeCtor::Array, inner_ty)
-            }
-            TypeRef::Slice(inner) => {
-                let inner_ty = Ty::from_hir(ctx, inner);
-                Ty::apply_one(TypeCtor::Slice, inner_ty)
-            }
-            TypeRef::Reference(inner, _, mutability) => {
-                let inner_ty = Ty::from_hir(ctx, inner);
-                Ty::apply_one(TypeCtor::Ref(*mutability), inner_ty)
-            }
-            TypeRef::Placeholder => Ty::Unknown,
-            TypeRef::Fn(params, is_varargs) => {
-                let sig = Substs(params.iter().map(|tr| Ty::from_hir(ctx, tr)).collect());
-                Ty::apply(
-                    TypeCtor::FnPtr { num_args: sig.len() as u16 - 1, is_varargs: *is_varargs },
-                    sig,
-                )
-            }
-            TypeRef::DynTrait(bounds) => {
-                let self_ty = Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0));
-                let predicates = ctx.with_shifted_in(DebruijnIndex::ONE, |ctx| {
-                    bounds
-                        .iter()
-                        .flat_map(|b| GenericPredicate::from_type_bound(ctx, b, self_ty.clone()))
-                        .collect()
-                });
-                Ty::Dyn(predicates)
-            }
-            TypeRef::ImplTrait(_) => Ty::Unknown,
-            TypeRef::Error => Ty::Unknown,
-        };
-        (ty, res)
+        let lower_ctx = crate::hir::lower::Context::new(ctx.db, ctx.resolver);
+        let typ = lower_ctx.lower_type(type_ref);
+        instantiate_outside_inference_local(ctx.db, ctx.resolver.generic_def(), &typ)
     }
 
     fn from_type_relative_path(
@@ -217,33 +164,6 @@ impl Ty {
         };
 
         Ty::from_type_relative_path(ctx, ty, Some(resolution), remaining_segments)
-    }
-
-    fn from_hir_path(ctx: &TyLoweringContext<'_>, path: &Path) -> (Ty, Option<TypeNs>) {
-        // Resolve the path (in type namespace)
-        if let Some(type_ref) = path.type_anchor() {
-            let (ty, res) = Ty::from_hir_ext(ctx, &type_ref);
-            return Ty::from_type_relative_path(ctx, ty, res, path.segments());
-        }
-        let (resolution, remaining_index) =
-            match ctx.resolver.resolve_path_in_type_ns(ctx.db.upcast(), path.mod_path()) {
-                Some(it) => it,
-                None => return (Ty::Unknown, None),
-            };
-        let (resolved_segment, remaining_segments) = match remaining_index {
-            None => (
-                path.segments().last().expect("resolved path has at least one element"),
-                PathSegments::EMPTY,
-            ),
-            Some(i) => (path.segments().get(i - 1).unwrap(), path.segments().skip(i)),
-        };
-        Ty::from_partly_resolved_hir_path(
-            ctx,
-            resolution,
-            resolved_segment,
-            remaining_segments,
-            false,
-        )
     }
 
     fn select_associated_type(

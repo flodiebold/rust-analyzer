@@ -755,7 +755,7 @@ impl Function {
         let environment = TraitEnvironment::lower(db, &resolver);
         Type {
             krate: self.id.lookup(db.upcast()).container.module(db.upcast()).krate(),
-            ty: InEnvironment { value: Ty::from_hir_ext(&ctx, ret_type).0, environment },
+            ty: InEnvironment { value: Ty::from_hir(&ctx, ret_type), environment },
         }
     }
 
@@ -777,7 +777,7 @@ impl Function {
                 let ty = Type {
                     krate: self.id.lookup(db.upcast()).container.module(db.upcast()).krate(),
                     ty: InEnvironment {
-                        value: Ty::from_hir_ext(&ctx, type_ref).0,
+                        value: Ty::from_hir(&ctx, type_ref),
                         environment: environment.clone(),
                     },
                 };

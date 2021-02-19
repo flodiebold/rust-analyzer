@@ -78,6 +78,20 @@ impl NoopInstantiateOps {
             shift: DebruijnIndex::INNERMOST,
         }
     }
+
+    pub(crate) fn ctx_local<'a>(
+        &mut self,
+        db: &'a dyn HirDatabase,
+        def: Option<GenericDefId>,
+    ) -> InstantiateContext<'a, '_> {
+        InstantiateContext {
+            db,
+            inf_ctx: self,
+            impl_trait_mode: ImplTraitInstantiationMode::Opaque,
+            type_param_mode: def.map_or(TypeParamInstantiationMode::Forbidden, TypeParamInstantiationMode::Local),
+            shift: DebruijnIndex::INNERMOST,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -443,4 +457,12 @@ pub(crate) fn instantiate_outside_inference<T: Instantiate>(
     let substs = Substs::bound_vars(&generics, DebruijnIndex::INNERMOST);
     let instantiated = NoopInstantiateOps.ctx_with_substs(db, def, substs).instantiate(t);
     Binders::new(generics.len(), instantiated)
+}
+
+pub(crate) fn instantiate_outside_inference_local<T: Instantiate>(
+    db: &dyn HirDatabase,
+    def: Option<GenericDefId>,
+    t: &T,
+) -> T::InstantiatedType {
+    NoopInstantiateOps.ctx_local(db, def).instantiate(t)
 }
