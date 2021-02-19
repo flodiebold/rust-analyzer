@@ -547,7 +547,7 @@ impl<'a> Context<'a> {
         &self,
         trait_bound: &TraitBound,
         segment: PathSegment,
-        acc: &mut SmallVec<[Bound; 1]>,
+        acc: &mut impl FnMut(Bound, Option<Type>),
     ) {
         let bindings = match segment.args_and_bindings {
             Some(a_and_b) => &a_and_b.bindings,
@@ -565,17 +565,42 @@ impl<'a> Context<'a> {
             };
             if let Some(type_ref) = &binding.type_ref {
                 let ty = self.lower_type(type_ref);
-                acc.push(Bound::AssocTypeBinding(AssocTypeBinding {
+                acc(Bound::AssocTypeBinding(AssocTypeBinding {
                     associated_ty,
                     arguments: super_trait_bound.arguments,
                     ty,
-                }));
+                }), None);
             }
 
             for bound in &binding.bounds {
+                // let bounds = self.lower_bound(bound);
                 // TODO these have a different self parameter, so they need to be modeled differently
                 // TODO also add a test for these
                 // acc.extend(self.lower_bound(bound));
+            }
+        }
+    }
+
+    pub(crate) fn lower_where_predicate(&self, generic_def: GenericDefId, where_predicate: &WherePredicate, acc: &mut impl FnMut(WhereClause)) {
+        let lower_target = |target: &WherePredicateTypeTarget| match target {
+            WherePredicateTypeTarget::TypeRef(type_ref) => self.lower_type(type_ref),
+            WherePredicateTypeTarget::TypeParam(local_id) => {
+                Type::Param(TypeParamId { parent: generic_def, local_id: *local_id })
+            }
+        };
+        match where_predicate {
+            WherePredicate::TypeBound { target, bound } => {
+                let ty = lower_target(target);
+                self.lower_bound(&bound)
+                    .into_iter()
+                    .for_each(|bound| acc(WhereClause { bound, ty: ty.clone() }));
+            }
+            WherePredicate::Lifetime { target, bound } => {}
+            WherePredicate::ForLifetime { lifetimes, target, bound } => {
+                let ty = lower_target(target);
+                self.lower_bound(&bound)
+                    .into_iter()
+                    .for_each(|bound| acc(WhereClause { bound, ty: ty.clone() }));
             }
         }
     }
@@ -806,28 +831,8 @@ pub(crate) fn generic_bounds_query(db: &dyn HirDatabase, def: GenericDefId) -> A
     let ctx = Context::new(db, &resolver);
     let generics = generics(db.upcast(), def);
     let mut acc = Vec::new();
-    let lower_target = |target: &WherePredicateTypeTarget| match target {
-        WherePredicateTypeTarget::TypeRef(type_ref) => ctx.lower_type(type_ref),
-        WherePredicateTypeTarget::TypeParam(local_id) => {
-            Type::Param(TypeParamId { parent: def, local_id: *local_id })
-        }
-    };
     for pred in resolver.where_predicates_in_scope() {
-        match pred {
-            WherePredicate::TypeBound { target, bound } => {
-                let ty = lower_target(target);
-                ctx.lower_bound(&bound)
-                    .into_iter()
-                    .for_each(|bound| acc.push(WhereClause { bound, ty: ty.clone() }));
-            }
-            WherePredicate::Lifetime { target, bound } => {}
-            WherePredicate::ForLifetime { lifetimes, target, bound } => {
-                let ty = lower_target(target);
-                ctx.lower_bound(&bound)
-                    .into_iter()
-                    .for_each(|bound| acc.push(WhereClause { bound, ty: ty.clone() }));
-            }
-        }
+        ctx.lower_where_predicate(def, pred, &mut |clause| acc.push(clause));
     }
     acc.into()
 }

@@ -10,28 +10,22 @@ use std::{iter, sync::Arc};
 use base_db::CrateId;
 use hir_def::{
     builtin_type::BuiltinType,
-    generics::{TypeParamProvenance, WherePredicate, WherePredicateTypeTarget},
-    path::{GenericArg, Path, PathSegment, PathSegments},
-    resolver::{Resolver, TypeNs},
-    type_ref::{TypeBound, TypeRef},
-    AdtId, AssocContainerId, AssocItemId, ConstId, ConstParamId, EnumId, EnumVariantId, FunctionId,
-    GenericDefId, HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId, TraitId,
+    path::{GenericArg, Path, PathSegment},
+    resolver::Resolver,
+    type_ref::TypeRef,
+    AdtId, AssocContainerId, ConstId, ConstParamId, EnumId, EnumVariantId, FunctionId,
+    GenericDefId, HasModule, ImplId, LocalFieldId, Lookup, StaticId, StructId,
     TypeAliasId, TypeParamId, UnionId, VariantId,
 };
-use hir_expand::name::Name;
 use la_arena::ArenaMap;
-use smallvec::SmallVec;
 use stdx::{always, impl_from};
 
 use crate::{
     db::HirDatabase,
     infer::{instantiate_outside_inference, instantiate_outside_inference_local},
-    utils::{
-        all_super_trait_refs, associated_type_by_name_including_super_traits, generics,
-        make_mut_slice,
-    },
-    Binders, BoundVar, DebruijnIndex, GenericPredicate, PolyFnSig, ProjectionPredicate,
-    ProjectionTy, ReturnTypeImplTrait, ReturnTypeImplTraits, Substs, TraitEnvironment, TraitRef,
+    utils::generics,
+    Binders, DebruijnIndex, GenericPredicate, PolyFnSig,
+    ReturnTypeImplTrait, ReturnTypeImplTraits, Substs, TraitEnvironment, TraitRef,
     Ty, TypeCtor, TypeWalk,
 };
 
@@ -39,31 +33,11 @@ use crate::{
 pub struct TyLoweringContext<'a> {
     pub db: &'a dyn HirDatabase,
     pub resolver: &'a Resolver,
-    in_binders: DebruijnIndex,
 }
 
 impl<'a> TyLoweringContext<'a> {
     pub fn new(db: &'a dyn HirDatabase, resolver: &'a Resolver) -> Self {
-        let in_binders = DebruijnIndex::INNERMOST;
-        Self { db, resolver, in_binders }
-    }
-
-    pub fn with_debruijn<T>(
-        &self,
-        debruijn: DebruijnIndex,
-        f: impl FnOnce(&TyLoweringContext) -> T,
-    ) -> T {
-        let new_ctx = Self { in_binders: debruijn, ..*self };
-        let result = f(&new_ctx);
-        result
-    }
-
-    pub fn with_shifted_in<T>(
-        &self,
-        debruijn: DebruijnIndex,
-        f: impl FnOnce(&TyLoweringContext) -> T,
-    ) -> T {
-        self.with_debruijn(self.in_binders.shifted_in_from(debruijn), f)
+        Self { db, resolver }
     }
 }
 
@@ -72,152 +46,6 @@ impl Ty {
         let lower_ctx = crate::hir::lower::Context::new(ctx.db, ctx.resolver);
         let typ = lower_ctx.lower_type(type_ref);
         instantiate_outside_inference_local(ctx.db, ctx.resolver.generic_def(), &typ)
-    }
-
-    fn from_type_relative_path(
-        ctx: &TyLoweringContext<'_>,
-        ty: Ty,
-        // We need the original resolution to lower `Self::AssocTy` correctly
-        res: Option<TypeNs>,
-        remaining_segments: PathSegments<'_>,
-    ) -> (Ty, Option<TypeNs>) {
-        if remaining_segments.len() == 1 {
-            // resolve unselected assoc types
-            let segment = remaining_segments.first().unwrap();
-            (Ty::select_associated_type(ctx, res, segment), None)
-        } else if remaining_segments.len() > 1 {
-            // FIXME report error (ambiguous associated type)
-            (Ty::Unknown, None)
-        } else {
-            (ty, res)
-        }
-    }
-
-    pub(crate) fn from_partly_resolved_hir_path(
-        ctx: &TyLoweringContext<'_>,
-        resolution: TypeNs,
-        resolved_segment: PathSegment<'_>,
-        remaining_segments: PathSegments<'_>,
-        infer_args: bool,
-    ) -> (Ty, Option<TypeNs>) {
-        let ty = match resolution {
-            TypeNs::TraitId(trait_) => {
-                // if this is a bare dyn Trait, we'll directly put the required ^0 for the self type in there
-                let self_ty = if remaining_segments.len() == 0 {
-                    Some(Ty::Bound(BoundVar::new(DebruijnIndex::INNERMOST, 0)))
-                } else {
-                    None
-                };
-                let trait_ref =
-                    TraitRef::from_resolved_path(ctx, trait_, resolved_segment, self_ty);
-                let ty = if remaining_segments.len() == 1 {
-                    let segment = remaining_segments.first().unwrap();
-                    let found = associated_type_by_name_including_super_traits(
-                        ctx.db,
-                        trait_ref,
-                        &segment.name,
-                    );
-                    match found {
-                        Some((super_trait_ref, associated_ty)) => {
-                            // FIXME handle type parameters on the segment
-                            Ty::Projection(ProjectionTy {
-                                associated_ty,
-                                parameters: super_trait_ref.substs,
-                            })
-                        }
-                        None => {
-                            // FIXME: report error (associated type not found)
-                            Ty::Unknown
-                        }
-                    }
-                } else if remaining_segments.len() > 1 {
-                    // FIXME report error (ambiguous associated type)
-                    Ty::Unknown
-                } else {
-                    Ty::Dyn(Arc::new([GenericPredicate::Implemented(trait_ref)]))
-                };
-                return (ty, None);
-            }
-            TypeNs::GenericParam(param_id) => Ty::Placeholder(param_id),
-            TypeNs::SelfType(impl_id) => {
-                let generics = generics(ctx.db.upcast(), impl_id.into());
-                let substs = Substs::type_params_for_generics(&generics);
-                ctx.db.impl_self_ty(impl_id).subst(&substs)
-            }
-            TypeNs::AdtSelfType(adt) => {
-                let generics = generics(ctx.db.upcast(), adt.into());
-                let substs = Substs::type_params_for_generics(&generics);
-                ctx.db.ty(adt.into()).subst(&substs)
-            }
-
-            TypeNs::AdtId(it) => {
-                Ty::from_hir_path_inner(ctx, resolved_segment, it.into(), infer_args)
-            }
-            TypeNs::BuiltinType(it) => {
-                Ty::from_hir_path_inner(ctx, resolved_segment, it.into(), infer_args)
-            }
-            TypeNs::TypeAliasId(it) => {
-                Ty::from_hir_path_inner(ctx, resolved_segment, it.into(), infer_args)
-            }
-            // FIXME: report error
-            TypeNs::EnumVariantId(_) => return (Ty::Unknown, None),
-        };
-
-        Ty::from_type_relative_path(ctx, ty, Some(resolution), remaining_segments)
-    }
-
-    fn select_associated_type(
-        ctx: &TyLoweringContext<'_>,
-        res: Option<TypeNs>,
-        segment: PathSegment<'_>,
-    ) -> Ty {
-        if let Some(res) = res {
-            let ty =
-                associated_type_shorthand_candidates(ctx.db, res, move |name, t, associated_ty| {
-                    if name == segment.name {
-                        let substs = {
-                            // if we're lowering to placeholders, we have to put
-                            // them in now
-                            let s = Substs::type_params(
-                                ctx.db,
-                                ctx.resolver
-                                    .generic_def()
-                                    .expect("there should be generics if there's a generic param"),
-                            );
-                            t.substs.clone().subst_bound_vars(&s)
-                        };
-                        // We need to shift in the bound vars, since
-                        // associated_type_shorthand_candidates does not do that
-                        let substs = substs.shift_bound_vars(ctx.in_binders);
-                        // FIXME handle type parameters on the segment
-                        return Some(Ty::Projection(ProjectionTy {
-                            associated_ty,
-                            parameters: substs,
-                        }));
-                    }
-
-                    None
-                });
-
-            ty.unwrap_or(Ty::Unknown)
-        } else {
-            Ty::Unknown
-        }
-    }
-
-    fn from_hir_path_inner(
-        ctx: &TyLoweringContext<'_>,
-        segment: PathSegment<'_>,
-        typeable: TyDefId,
-        infer_args: bool,
-    ) -> Ty {
-        let generic_def = match typeable {
-            TyDefId::BuiltinType(_) => None,
-            TyDefId::AdtId(it) => Some(it.into()),
-            TyDefId::TypeAliasId(it) => Some(it.into()),
-        };
-        let substs = substs_from_path_segment(ctx, segment, generic_def, infer_args);
-        ctx.db.ty(typeable).subst(&substs)
     }
 
     /// Collect generic arguments from a path into a `Substs`. See also
@@ -326,195 +154,10 @@ fn substs_from_path_segment(
     Substs(substs.into())
 }
 
-impl TraitRef {
-    fn from_path(
-        ctx: &TyLoweringContext<'_>,
-        path: &Path,
-        explicit_self_ty: Option<Ty>,
-    ) -> Option<Self> {
-        let resolved =
-            match ctx.resolver.resolve_path_in_type_ns_fully(ctx.db.upcast(), path.mod_path())? {
-                TypeNs::TraitId(tr) => tr,
-                _ => return None,
-            };
-        let segment = path.segments().last().expect("path should have at least one segment");
-        Some(TraitRef::from_resolved_path(ctx, resolved, segment, explicit_self_ty))
-    }
-
-    fn from_resolved_path(
-        ctx: &TyLoweringContext<'_>,
-        resolved: TraitId,
-        segment: PathSegment<'_>,
-        explicit_self_ty: Option<Ty>,
-    ) -> Self {
-        let mut substs = TraitRef::substs_from_path(ctx, segment, resolved);
-        if let Some(self_ty) = explicit_self_ty {
-            make_mut_slice(&mut substs.0)[0] = self_ty;
-        }
-        TraitRef { trait_: resolved, substs }
-    }
-
-    fn substs_from_path(
-        ctx: &TyLoweringContext<'_>,
-        segment: PathSegment<'_>,
-        resolved: TraitId,
-    ) -> Substs {
-        substs_from_path_segment(ctx, segment, Some(resolved.into()), false)
-    }
-}
-
-impl GenericPredicate {
-    fn from_where_predicate<'a>(
-        ctx: &'a TyLoweringContext<'a>,
-        where_predicate: &'a WherePredicate,
-    ) -> impl Iterator<Item = GenericPredicate> + 'a {
-        match where_predicate {
-            WherePredicate::ForLifetime { target, bound, .. }
-            | WherePredicate::TypeBound { target, bound } => {
-                let self_ty = match target {
-                    WherePredicateTypeTarget::TypeRef(type_ref) => Ty::from_hir(ctx, type_ref),
-                    WherePredicateTypeTarget::TypeParam(param_id) => {
-                        let generic_def = ctx.resolver.generic_def().expect("generics in scope");
-                        let param_id =
-                            hir_def::TypeParamId { parent: generic_def, local_id: *param_id };
-                        Ty::Placeholder(param_id)
-                    }
-                };
-                GenericPredicate::from_type_bound(ctx, bound, self_ty)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            }
-            WherePredicate::Lifetime { .. } => vec![].into_iter(),
-        }
-    }
-
-    fn from_type_bound<'a>(
-        ctx: &'a TyLoweringContext<'a>,
-        bound: &'a TypeBound,
-        self_ty: Ty,
-    ) -> impl Iterator<Item = GenericPredicate> + 'a {
-        let mut bindings = None;
-        let trait_ref = match bound {
-            TypeBound::Path(path) => {
-                bindings = TraitRef::from_path(ctx, path, Some(self_ty));
-                Some(
-                    bindings.clone().map_or(GenericPredicate::Error, GenericPredicate::Implemented),
-                )
-            }
-            TypeBound::Lifetime(_) => None,
-            TypeBound::Error => Some(GenericPredicate::Error),
-        };
-        trait_ref.into_iter().chain(
-            bindings
-                .into_iter()
-                .flat_map(move |tr| assoc_type_bindings_from_type_bound(ctx, bound, tr)),
-        )
-    }
-}
-
-fn assoc_type_bindings_from_type_bound<'a>(
-    ctx: &'a TyLoweringContext<'a>,
-    bound: &'a TypeBound,
-    trait_ref: TraitRef,
-) -> impl Iterator<Item = GenericPredicate> + 'a {
-    let last_segment = match bound {
-        TypeBound::Path(path) => path.segments().last(),
-        TypeBound::Error | TypeBound::Lifetime(_) => None,
-    };
-    last_segment
-        .into_iter()
-        .flat_map(|segment| segment.args_and_bindings.into_iter())
-        .flat_map(|args_and_bindings| args_and_bindings.bindings.iter())
-        .flat_map(move |binding| {
-            let found = associated_type_by_name_including_super_traits(
-                ctx.db,
-                trait_ref.clone(),
-                &binding.name,
-            );
-            let (super_trait_ref, associated_ty) = match found {
-                None => return SmallVec::<[GenericPredicate; 1]>::new(),
-                Some(t) => t,
-            };
-            let projection_ty = ProjectionTy { associated_ty, parameters: super_trait_ref.substs };
-            let mut preds = SmallVec::with_capacity(
-                binding.type_ref.as_ref().map_or(0, |_| 1) + binding.bounds.len(),
-            );
-            if let Some(type_ref) = &binding.type_ref {
-                let ty = Ty::from_hir(ctx, type_ref);
-                let projection_predicate =
-                    ProjectionPredicate { projection_ty: projection_ty.clone(), ty };
-                preds.push(GenericPredicate::Projection(projection_predicate));
-            }
-            for bound in &binding.bounds {
-                preds.extend(GenericPredicate::from_type_bound(
-                    ctx,
-                    bound,
-                    Ty::Projection(projection_ty.clone()),
-                ));
-            }
-            preds
-        })
-}
-
 /// Build the signature of a callable item (function, struct or enum variant).
 pub fn callable_item_sig(db: &dyn HirDatabase, def: CallableDefId) -> PolyFnSig {
     let sig = db.callable_item_signature_2(def);
     instantiate_outside_inference(db, def.into(), &sig)
-}
-
-fn associated_type_shorthand_candidates<R>(
-    db: &dyn HirDatabase,
-    res: TypeNs,
-    mut cb: impl FnMut(&Name, &TraitRef, TypeAliasId) -> Option<R>,
-) -> Option<R> {
-    let traits_from_env: Vec<_> = match res {
-        TypeNs::SelfType(impl_id) => match db.impl_trait(impl_id) {
-            None => vec![],
-            Some(trait_ref) => vec![trait_ref.value],
-        },
-        TypeNs::GenericParam(param_id) => {
-            let predicates = db.generic_predicates_for_param(param_id);
-            let mut traits_: Vec<_> = predicates
-                .iter()
-                .filter_map(|pred| match &pred.value {
-                    GenericPredicate::Implemented(tr) => Some(tr.clone()),
-                    _ => None,
-                })
-                .collect();
-            // Handle `Self::Type` referring to own associated type in trait definitions
-            if let GenericDefId::TraitId(trait_id) = param_id.parent {
-                let generics = generics(db.upcast(), trait_id.into());
-                if generics.params.types[param_id.local_id].provenance
-                    == TypeParamProvenance::TraitSelf
-                {
-                    let trait_ref = TraitRef {
-                        trait_: trait_id,
-                        substs: Substs::bound_vars(&generics, DebruijnIndex::INNERMOST),
-                    };
-                    traits_.push(trait_ref);
-                }
-            }
-            traits_
-        }
-        _ => vec![],
-    };
-
-    for t in traits_from_env.into_iter().flat_map(move |t| all_super_trait_refs(db, t)) {
-        let data = db.trait_data(t.trait_);
-
-        for (name, assoc_id) in &data.items {
-            match assoc_id {
-                AssocItemId::TypeAliasId(alias) => {
-                    if let Some(result) = cb(name, &t, *alias) {
-                        return Some(result);
-                    }
-                }
-                AssocItemId::FunctionId(_) | AssocItemId::ConstId(_) => {}
-            }
-        }
-    }
-
-    None
 }
 
 /// Build the type of all specific fields of a struct or enum variant.
@@ -564,13 +207,15 @@ pub(crate) fn generic_predicates_for_param_query(
 
 impl TraitEnvironment {
     pub fn lower(db: &dyn HirDatabase, resolver: &Resolver) -> Arc<TraitEnvironment> {
-        let ctx = TyLoweringContext::new(db, &resolver);
-        let mut predicates = resolver
-            .where_predicates_in_scope()
-            .flat_map(|pred| GenericPredicate::from_where_predicate(&ctx, pred))
-            .collect::<Vec<_>>();
+        let mut predicates = Vec::new();
 
         if let Some(def) = resolver.generic_def() {
+            let ctx = crate::hir::lower::Context::new(db, resolver);
+            resolver
+                .where_predicates_in_scope()
+                .for_each(|pred| {
+                    ctx.lower_where_predicate(def, pred, &mut |clause| predicates.push(instantiate_outside_inference_local(db, Some(def), &clause)));
+                });
             let container: Option<AssocContainerId> = match def {
                 // FIXME: is there a function for this?
                 GenericDefId::FunctionId(f) => Some(f.lookup(db.upcast()).container),
