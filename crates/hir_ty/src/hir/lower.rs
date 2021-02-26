@@ -477,11 +477,16 @@ impl<'a> Context<'a> {
         TypeArgs(substs.into())
     }
 
-    pub fn lower_bound(&self, bound: &TypeBound) -> SmallVec<[Bound; 1]> {
+    pub fn lower_bound(
+        &self,
+        bound: &TypeBound,
+        self_type: &Type,
+        acc: &mut impl FnMut(Bound, Option<Type>),
+    ) {
         match bound {
-            TypeBound::Path(path) => self.lower_path_to_bounds(path),
-            TypeBound::Lifetime(_) => SmallVec::new(),
-            TypeBound::Error => SmallVec::from_buf([Bound::Error]),
+            TypeBound::Path(path) => self.lower_path_to_bounds(path, self_type, acc),
+            TypeBound::Lifetime(_) => {}
+            TypeBound::Error => acc(Bound::Error, None),
         }
     }
 
@@ -493,41 +498,55 @@ impl<'a> Context<'a> {
                 return None;
             }
         };
-        let bounds = self.lower_path_to_bounds(path);
-        let trait_bound = match &bounds[0] {
-            Bound::Trait(trait_bound) => trait_bound.clone(),
-            _ => {
-                // FIXME report error, if this can actually happen
-                return None;
+        let mut trait_bound = None;
+        self.lower_path_to_bounds(path, &Type::Error, &mut |bound, target| {
+            if trait_bound.is_some() || target.is_some() {
+                // FIXME report error
+                return;
             }
-        };
+            match bound {
+                Bound::Trait(tb) => {
+                    trait_bound = Some(tb);
+                }
+                _ => {
+                    // FIXME report error
+                }
+            }
+        });
         // FIXME report errors about additional bounds
-        Some(trait_bound)
+        trait_bound
     }
 
-    fn lower_path_to_bounds(&self, path: &Path) -> SmallVec<[Bound; 1]> {
+    fn lower_path_to_bounds(
+        &self,
+        path: &Path,
+        self_type: &Type,
+        acc: &mut impl FnMut(Bound, Option<Type>),
+    ) {
         let trait_ =
             match self.resolver.resolve_path_in_type_ns_fully(self.db.upcast(), path.mod_path()) {
                 Some(TypeNs::TraitId(tr)) => tr,
                 _ => {
                     // FIXME report error
-                    return SmallVec::from_buf([Bound::Error]);
+                    acc(Bound::Error, None);
+                    return;
                 }
             };
         let segment = path.segments().last().expect("path should have at least one segment");
-        self.lower_resolved_path_to_bounds(trait_, segment)
+        self.lower_resolved_path_to_bounds(trait_, segment, self_type, acc)
     }
 
     fn lower_resolved_path_to_bounds(
         &self,
         trait_: TraitId,
         segment: PathSegment<'_>,
-    ) -> SmallVec<[Bound; 1]> {
+        self_type: &Type,
+        acc: &mut impl FnMut(Bound, Option<Type>),
+    ) {
         let arguments = self.args_from_path_segment(segment.clone(), trait_.into(), false, false);
         let trait_bound = TraitBound { trait_, arguments };
-        let mut result = SmallVec::from_buf([Bound::Trait(trait_bound.clone())]);
-        self.lower_assoc_type_bindings(&trait_bound, segment, &mut result);
-        result
+        acc(Bound::Trait(trait_bound.clone()), None);
+        self.lower_assoc_type_bindings(&trait_bound, segment, self_type, acc);
     }
 
     pub fn lower_resolved_path_to_trait_bound_and_self_type(
@@ -547,6 +566,7 @@ impl<'a> Context<'a> {
         &self,
         trait_bound: &TraitBound,
         segment: PathSegment,
+        self_type: &Type,
         acc: &mut impl FnMut(Bound, Option<Type>),
     ) {
         let bindings = match segment.args_and_bindings {
@@ -565,23 +585,35 @@ impl<'a> Context<'a> {
             };
             if let Some(type_ref) = &binding.type_ref {
                 let ty = self.lower_type(type_ref);
-                acc(Bound::AssocTypeBinding(AssocTypeBinding {
-                    associated_ty,
-                    arguments: super_trait_bound.arguments,
-                    ty,
-                }), None);
+                acc(
+                    Bound::AssocTypeBinding(AssocTypeBinding {
+                        associated_ty,
+                        arguments: super_trait_bound.arguments,
+                        ty,
+                    }),
+                    None,
+                );
             }
 
             for bound in &binding.bounds {
-                // let bounds = self.lower_bound(bound);
-                // TODO these have a different self parameter, so they need to be modeled differently
-                // TODO also add a test for these
-                // acc.extend(self.lower_bound(bound));
+                let arguments = Some(self_type.clone())
+                    .into_iter()
+                    .chain(super_trait_bound.arguments.iter().cloned())
+                    .collect();
+                let self_type = Type::Projection(ProjectionType { associated_ty, arguments });
+                self.lower_bound(bound, &self_type, &mut |bound, target| {
+                    acc(bound, Some(target.unwrap_or_else(|| self_type.clone())));
+                });
             }
         }
     }
 
-    pub(crate) fn lower_where_predicate(&self, generic_def: GenericDefId, where_predicate: &WherePredicate, acc: &mut impl FnMut(WhereClause)) {
+    pub(crate) fn lower_where_predicate(
+        &self,
+        generic_def: GenericDefId,
+        where_predicate: &WherePredicate,
+        acc: &mut impl FnMut(WhereClause),
+    ) {
         let lower_target = |target: &WherePredicateTypeTarget| match target {
             WherePredicateTypeTarget::TypeRef(type_ref) => self.lower_type(type_ref),
             WherePredicateTypeTarget::TypeParam(local_id) => {
@@ -591,16 +623,16 @@ impl<'a> Context<'a> {
         match where_predicate {
             WherePredicate::TypeBound { target, bound } => {
                 let ty = lower_target(target);
-                self.lower_bound(&bound)
-                    .into_iter()
-                    .for_each(|bound| acc(WhereClause { bound, ty: ty.clone() }));
+                self.lower_bound(&bound, &ty, &mut |bound, target| {
+                    acc(WhereClause { bound, ty: target.unwrap_or_else(|| ty.clone()) })
+                });
             }
             WherePredicate::Lifetime { target, bound } => {}
             WherePredicate::ForLifetime { lifetimes, target, bound } => {
                 let ty = lower_target(target);
-                self.lower_bound(&bound)
-                    .into_iter()
-                    .for_each(|bound| acc(WhereClause { bound, ty: ty.clone() }));
+                self.lower_bound(&bound, &ty, &mut |bound, target| {
+                    acc(WhereClause { bound, ty: target.unwrap_or_else(|| ty.clone()) })
+                });
             }
         }
     }
