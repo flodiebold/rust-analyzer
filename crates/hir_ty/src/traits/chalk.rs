@@ -33,13 +33,13 @@ pub(super) mod tls;
 mod interner;
 mod mapping;
 
-pub(super) trait ToChalk {
+pub(crate) trait ToChalk {
     type Chalk;
     fn to_chalk(self, db: &dyn HirDatabase) -> Self::Chalk;
     fn from_chalk(db: &dyn HirDatabase, chalk: Self::Chalk) -> Self;
 }
 
-pub(super) fn from_chalk<T, ChalkT>(db: &dyn HirDatabase, chalk: ChalkT) -> T
+pub(crate) fn from_chalk<T, ChalkT>(db: &dyn HirDatabase, chalk: ChalkT) -> T
 where
     T: ToChalk<Chalk = ChalkT>,
 {
@@ -357,11 +357,24 @@ impl<'a> chalk_ir::UnificationDatabase<Interner> for ChalkContext<'a> {
         &self,
         fn_def_id: chalk_ir::FnDefId<Interner>,
     ) -> chalk_ir::Variances<Interner> {
-        self.db.fn_def_variance(self.krate, fn_def_id)
+        self.db.fn_def_variance(fn_def_id)
     }
 
     fn adt_variance(&self, adt_id: chalk_ir::AdtId<Interner>) -> chalk_ir::Variances<Interner> {
-        self.db.adt_variance(self.krate, adt_id)
+        self.db.adt_variance(adt_id)
+    }
+}
+
+impl<'a> chalk_ir::UnificationDatabase<Interner> for &dyn HirDatabase {
+    fn fn_def_variance(
+        &self,
+        fn_def_id: chalk_ir::FnDefId<Interner>,
+    ) -> chalk_ir::Variances<Interner> {
+        HirDatabase::fn_def_variance(*self, fn_def_id)
+    }
+
+    fn adt_variance(&self, adt_id: chalk_ir::AdtId<Interner>) -> chalk_ir::Variances<Interner> {
+        HirDatabase::adt_variance(*self, adt_id)
     }
 }
 
@@ -669,7 +682,6 @@ pub(crate) fn fn_def_datum_query(
 
 pub(crate) fn fn_def_variance_query(
     db: &dyn HirDatabase,
-    _krate: CrateId,
     fn_def_id: FnDefId,
 ) -> Variances {
     let callable_def: CallableDefId = from_chalk(db, fn_def_id);
@@ -682,7 +694,6 @@ pub(crate) fn fn_def_variance_query(
 
 pub(crate) fn adt_variance_query(
     db: &dyn HirDatabase,
-    _krate: CrateId,
     chalk_ir::AdtId(adt_id): AdtId,
 ) -> Variances {
     let generic_params = generics(db.upcast(), adt_id.into());

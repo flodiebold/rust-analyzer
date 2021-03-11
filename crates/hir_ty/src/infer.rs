@@ -40,9 +40,7 @@ use super::{
     traits::{Guidance, Obligation, ProjectionPredicate, Solution},
     InEnvironment, ProjectionTy, Substs, TraitEnvironment, TraitRef, Ty, TypeWalk,
 };
-use crate::{
-    db::HirDatabase, infer::diagnostics::InferenceDiagnostic, lower::ImplTraitLoweringMode, AliasTy,
-};
+use crate::{AliasTy, db::HirDatabase, infer::diagnostics::InferenceDiagnostic, lower::ImplTraitLoweringMode, traits::chalk::{Interner, ToChalk, from_chalk}};
 
 pub(crate) use unify::unify;
 
@@ -51,6 +49,9 @@ mod path;
 mod expr;
 mod pat;
 mod coerce;
+
+type ChalkTy = chalk_ir::Ty<Interner>;
+type ChalkEnvironment = chalk_ir::Environment<Interner>;
 
 /// The entry point of type inference.
 pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<InferenceResult> {
@@ -182,14 +183,14 @@ impl Index<PatId> for InferenceResult {
 }
 
 /// The inference context contains all information needed during type inference.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct InferenceContext<'a> {
     db: &'a dyn HirDatabase,
     owner: DefWithBodyId,
     body: Arc<Body>,
     resolver: Resolver,
-    table: unify::InferenceTable,
-    trait_env: Arc<TraitEnvironment>,
+    table: chalk_solve::infer::InferenceTable<Interner>,
+    trait_env: ChalkEnvironment,
     obligations: Vec<Obligation>,
     result: InferenceResult,
     /// The return type of the function being inferred, or the closure if we're
@@ -198,9 +199,11 @@ struct InferenceContext<'a> {
     /// We might consider using a nested inference context for checking
     /// closures, but currently this is the only field that will change there,
     /// so it doesn't make sense.
-    return_ty: Ty,
+    return_ty: ChalkTy,
     diverges: Diverges,
     breakables: Vec<BreakableContext>,
+    type_of_expr: ArenaMap<ExprId, ChalkTy>,
+    type_of_pat: ArenaMap<PatId, ChalkTy>,
 }
 
 #[derive(Clone, Debug)]
@@ -220,20 +223,26 @@ fn find_breakable<'c>(
     }
 }
 
+fn error_ty() -> ChalkTy {
+    chalk_ir::TyKind::Error.intern(&Interner)
+}
+
 impl<'a> InferenceContext<'a> {
     fn new(db: &'a dyn HirDatabase, owner: DefWithBodyId, resolver: Resolver) -> Self {
         InferenceContext {
             result: InferenceResult::default(),
-            table: unify::InferenceTable::new(),
+            table: chalk_solve::infer::InferenceTable::new(),
             obligations: Vec::default(),
-            return_ty: Ty::Unknown, // set in collect_fn_signature
-            trait_env: TraitEnvironment::lower(db, &resolver),
+            return_ty: error_ty(), // set in collect_fn_signature
+            trait_env: TraitEnvironment::lower(db, &resolver).to_chalk(db),
             db,
             owner,
             body: db.body(owner),
             resolver,
             diverges: Diverges::Maybe,
             breakables: Vec::new(),
+            type_of_expr: Default::default(),
+            type_of_pat: Default::default(),
         }
     }
 
@@ -283,29 +292,32 @@ impl<'a> InferenceContext<'a> {
         &mut self,
         type_ref: &TypeRef,
         impl_trait_mode: ImplTraitLoweringMode,
-    ) -> Ty {
+    ) -> ChalkTy {
         // FIXME use right resolver for block
         let ctx = crate::lower::TyLoweringContext::new(self.db, &self.resolver)
             .with_impl_trait_mode(impl_trait_mode);
-        let ty = Ty::from_hir(&ctx, type_ref);
+        let ty = Ty::from_hir(&ctx, type_ref).to_chalk(self.db);
         let ty = self.insert_type_vars(ty);
         self.normalize_associated_types_in(ty)
     }
 
-    fn make_ty(&mut self, type_ref: &TypeRef) -> Ty {
-        self.make_ty_with_mode(type_ref, ImplTraitLoweringMode::Disallowed)
+    fn make_ty(&mut self, type_ref: &TypeRef) -> ChalkTy {
+        self.make_ty_with_mode(type_ref, ImplTraitLoweringMode::Disallowed).to_chalk(self.db)
     }
 
     /// Replaces Ty::Unknown by a new type var, so we can maybe still infer it.
-    fn insert_type_vars_shallow(&mut self, ty: Ty) -> Ty {
-        match ty {
-            Ty::Unknown => self.table.new_type_var(),
-            _ => ty,
-        }
+    fn insert_type_vars_shallow(&mut self, ty: ChalkTy) -> ChalkTy {
+        // match ty {
+        //     Ty::Unknown => self.table.new_variable().to_ty(&Interner),
+        //     _ => ty,
+        // }
+        // TODO
+        ty
     }
 
-    fn insert_type_vars(&mut self, ty: Ty) -> Ty {
-        ty.fold(&mut |ty| self.insert_type_vars_shallow(ty))
+    fn insert_type_vars(&mut self, ty: ChalkTy) -> ChalkTy {
+        // TODO
+        ty
     }
 
     fn resolve_obligations_as_possible(&mut self) {
@@ -335,41 +347,43 @@ impl<'a> InferenceContext<'a> {
         }
     }
 
-    fn unify(&mut self, ty1: &Ty, ty2: &Ty) -> bool {
-        self.table.unify(ty1, ty2)
+    fn unify(&mut self, ty1: &ChalkTy, ty2: &ChalkTy) -> bool {
+        self.table.relate(&Interner, &self.db, &self.trait_env, chalk_ir::Variance::Invariant, ty1, ty2).is_ok()
     }
 
     /// Resolves the type as far as currently possible, replacing type variables
     /// by their known types. All types returned by the infer_* functions should
     /// be resolved as far as possible, i.e. contain no type variables with
     /// known type.
-    fn resolve_ty_as_possible(&mut self, ty: Ty) -> Ty {
+    fn resolve_ty_as_possible(&mut self, ty: ChalkTy) -> ChalkTy {
         self.resolve_obligations_as_possible();
 
-        self.table.resolve_ty_as_possible(ty)
+        // self.table.resolve_ty_as_possible(ty)
+        // TODO
+        ty
     }
 
-    fn resolve_ty_shallow<'b>(&mut self, ty: &'b Ty) -> Cow<'b, Ty> {
-        self.table.resolve_ty_shallow(ty)
+    fn resolve_ty_shallow<'b>(&mut self, ty: &'b ChalkTy) -> Cow<'b, ChalkTy> {
+        self.table.normalize_ty_shallow(&Interner, ty).map_or(Cow::Borrowed(ty), Cow::Owned)
     }
 
-    fn resolve_associated_type(&mut self, inner_ty: Ty, assoc_ty: Option<TypeAliasId>) -> Ty {
+    fn resolve_associated_type(&mut self, inner_ty: ChalkTy, assoc_ty: Option<TypeAliasId>) -> ChalkTy {
         self.resolve_associated_type_with_params(inner_ty, assoc_ty, &[])
     }
 
     fn resolve_associated_type_with_params(
         &mut self,
-        inner_ty: Ty,
+        inner_ty: ChalkTy,
         assoc_ty: Option<TypeAliasId>,
-        params: &[Ty],
-    ) -> Ty {
+        params: &[ChalkTy],
+    ) -> ChalkTy {
         match assoc_ty {
             Some(res_assoc_ty) => {
                 let trait_ = match res_assoc_ty.lookup(self.db.upcast()).container {
                     hir_def::AssocContainerId::TraitId(trait_) => trait_,
                     _ => panic!("resolve_associated_type called with non-associated type"),
                 };
-                let ty = self.table.new_type_var();
+                let ty = self.table.new_variable().to_ty(&Interner);
                 let substs = Substs::build_for_def(self.db, res_assoc_ty)
                     .push(inner_ty)
                     .fill(params.iter().cloned())
@@ -383,7 +397,7 @@ impl<'a> InferenceContext<'a> {
                 self.obligations.push(Obligation::Projection(projection));
                 self.resolve_ty_as_possible(ty)
             }
-            None => Ty::Unknown,
+            None => error_ty(),
         }
     }
 
@@ -393,12 +407,9 @@ impl<'a> InferenceContext<'a> {
     /// type annotation (e.g. from a let type annotation, field type or function
     /// call). `make_ty` handles this already, but e.g. for field types we need
     /// to do it as well.
-    fn normalize_associated_types_in(&mut self, ty: Ty) -> Ty {
-        let ty = self.resolve_ty_as_possible(ty);
-        ty.fold(&mut |ty| match ty {
-            Ty::Alias(AliasTy::Projection(proj_ty)) => self.normalize_projection_ty(proj_ty),
-            _ => ty,
-        })
+    fn normalize_associated_types_in(&mut self, ty: ChalkTy) -> ChalkTy {
+        // TODO
+        ty
     }
 
     fn normalize_projection_ty(&mut self, proj_ty: ProjectionTy) -> Ty {
