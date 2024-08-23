@@ -12,6 +12,7 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
+la-arena.workspace = true
 base-db.workspace = true
 cranelift.workspace = true
 cranelift-module.workspace = true
@@ -25,7 +26,10 @@ rustc-hash.workspace = true
 span.workspace = true
 triomphe.workspace = true
 
+chalk-ir.workspace = true
+
 anyhow.workspace = true # FIXME
+
 
 [dev-dependencies]
 test-utils.workspace = true

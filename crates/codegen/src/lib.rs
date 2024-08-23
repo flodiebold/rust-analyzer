@@ -6,12 +6,13 @@ mod tests;
 use anyhow::{anyhow, Context};
 use cranelift::{
     codegen,
-    prelude::{settings, AbiParam, Configurable, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type},
+    prelude::{settings, AbiParam, Configurable, EntityRef, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type, Variable},
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, Linkage, Module};
 use hir_def::FunctionId;
-use hir_ty::db::HirDatabase;
+use hir_ty::{db::HirDatabase, mir::{BasicBlockId, LocalId, MirBody, Operand, Rvalue, StatementKind, TerminatorKind}, Interner, Substitution};
+use la_arena::ArenaMap;
 
 pub struct Jit {
     /// The function builder context, which is reused across multiple
@@ -57,7 +58,7 @@ impl Jit {
     fn compile(
         &mut self,
         db: &dyn HirDatabase,
-        func: FunctionId,
+        func_id: FunctionId,
     ) -> Result<*const u8, anyhow::Error> {
         // 1. get MIR for func
         // 2. generate code, compiling dependent functions as necessary
@@ -72,9 +73,27 @@ impl Jit {
         builder.switch_to_block(entry_block);
         builder.seal_block(entry_block);
 
-        let val = builder.ins().iconst(t_i32, 4);
-        builder.ins().return_(&[val]);
-        builder.finalize();
+        let body = db
+            .monomorphized_mir_body(
+                func_id.into(),
+                Substitution::empty(Interner),
+                db.trait_environment(func_id.into()),
+            )
+            .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
+
+        let mut translator = FunctionTranslator {
+            db,
+            body: &body,
+            variables: ArenaMap::new(),
+            builder,
+            module: &mut self.module,
+        };
+
+        translator.compile_mir_block(body.start_block);
+
+        // let val = builder.ins().iconst(t_i32, 4);
+        // builder.ins().return_(&[val]);
+        // builder.finalize();
 
         let id = self.module.declare_function("test", Linkage::Export, &self.ctx.func.signature)
             .context("failed to declare function")?;
@@ -101,4 +120,72 @@ impl Jit {
 
         Ok(code)
     }
+}
+
+struct FunctionTranslator<'a> {
+    db: &'a dyn HirDatabase,
+    body: &'a MirBody,
+    variables: ArenaMap<LocalId, Variable>,
+    builder: FunctionBuilder<'a>,
+    module: &'a mut JITModule,
+}
+
+impl<'a> FunctionTranslator<'a> {
+    fn compile_mir_block(&mut self, block_id: BasicBlockId) {
+        eprintln!("locals: {:?}", self.body.locals);
+        let block = &self.body.basic_blocks[block_id];
+        for stmt in &block.statements {
+            match &stmt.kind {
+                StatementKind::Assign(place, rvalue) => {
+                    let projection = place.projection.lookup(&self.body.projection_store);
+                    if !projection.is_empty() {
+                        panic!("unsupported projection");
+                    }
+                    let variable = *self.variables.entry(place.local).or_insert_with(|| {
+                        let var = Variable::new(place.local.into_raw().into_u32() as usize);
+                        let t_i32 = Type::int(32).unwrap();
+                        self.builder.declare_var(var, t_i32);
+                        var
+                    });
+                    let value = match rvalue {
+                        Rvalue::Use(operand) => {
+                            match operand {
+                                Operand::Constant(konst) => {
+                                    let _ty = &konst.data(Interner).ty;
+                                    let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
+                                        panic!("evaluating non concrete constant");
+                                    };
+                                    match &c.interned {
+                                        hir_ty::ConstScalar::Bytes(bytes, _mm) => {
+                                            let t_i32 = Type::int(32).unwrap();
+                                            let bytes: &[u8; 4] = bytes.as_ref().try_into().unwrap();
+                                            self.builder.ins().iconst(t_i32, i32::from_le_bytes(*bytes) as i64)
+                                        },
+                                        hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
+                                        hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
+                                    }
+                                },
+                                _ => panic!("unsupported operand: {:?}", operand),
+                            }
+                        },
+                        _ => panic!("unsupported rvalue: {:?}", rvalue),
+                    };
+                    self.builder.def_var(variable, value);
+                }
+                _ => panic!("unsupported stmt kind: {:?}", stmt.kind),
+            }
+        }
+        let terminator = block.terminator.as_ref().unwrap();
+        match terminator.kind {
+            TerminatorKind::Return => {
+                let return_var = self.builder.use_var(self.variables[return_slot()]);
+                self.builder.ins().return_(&[return_var]);
+            }
+            _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
+        }
+    }
+}
+
+fn return_slot() -> LocalId {
+    LocalId::from_raw(la_arena::RawIdx::from(0))
 }
