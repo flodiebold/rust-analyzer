@@ -4,8 +4,6 @@ use test_fixture::WithFixture;
 
 use crate::{test_db::TestDB, Jit};
 
-
-
 fn eval_fn_i32(db: &TestDB, file_id: EditionedFileId) -> Result<i32, String> {
     let module_id = db.module_for_file(file_id);
     let def_map = module_id.def_map(db);
@@ -40,14 +38,43 @@ fn check_i32(ra_fixture: &str, expected: i32) {
 
 #[test]
 fn test_1() {
-    check_i32(r#"
+    check_i32(
+        r#"
 fn test() -> i32 { 4 }
-"#, 4)
+"#,
+        4,
+    )
 }
 
 #[test]
 fn test_2() {
-    check_i32(r#"
+    check_i32(
+        r#"
 fn test() -> i32 { 5 }
-"#, 5)
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_3() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let x = 1;
+    x
+}
+"#,
+        1,
+    )
+}
+
+#[test]
+fn test_4() {
+    check_i32(
+        r#"
+fn test() -> i32 { 1 + 4 }
+"#,
+        5,
+    )
 }

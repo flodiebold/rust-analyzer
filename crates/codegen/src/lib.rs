@@ -6,12 +6,22 @@ mod tests;
 use anyhow::{anyhow, Context};
 use cranelift::{
     codegen,
-    prelude::{settings, AbiParam, Configurable, EntityRef, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type, Value, Variable},
+    prelude::{
+        settings, AbiParam, Configurable, EntityRef, FunctionBuilder, FunctionBuilderContext,
+        InstBuilder, Type, Value, Variable,
+    },
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, Linkage, Module};
 use hir_def::FunctionId;
-use hir_ty::{db::HirDatabase, mir::{BasicBlockId, LocalId, MirBody, Operand, Rvalue, StatementKind, TerminatorKind}, Interner, Substitution};
+use hir_ty::{
+    db::HirDatabase,
+    mir::{
+        BasicBlockId, BinOp, LocalId, MirBody, Operand, Place, Rvalue, StatementKind,
+        TerminatorKind,
+    },
+    Interner, Substitution,
+};
 use la_arena::ArenaMap;
 
 pub struct Jit {
@@ -95,7 +105,9 @@ impl Jit {
         // builder.ins().return_(&[val]);
         // builder.finalize();
 
-        let id = self.module.declare_function("test", Linkage::Export, &self.ctx.func.signature)
+        let id = self
+            .module
+            .declare_function("test", Linkage::Export, &self.ctx.func.signature)
             .context("failed to declare function")?;
 
         // Define the function to jit. This finishes compilation, although
@@ -103,9 +115,7 @@ impl Jit {
         // cannot finish relocations until all functions to be called are
         // defined. For this toy demo for now, we'll just finalize the
         // function below.
-        self.module
-            .define_function(id, &mut self.ctx)
-            .context("failed to define function")?;
+        self.module.define_function(id, &mut self.ctx).context("failed to define function")?;
 
         // Now that compilation is finished, we can clear out the context state.
         self.module.clear_context(&mut self.ctx);
@@ -141,6 +151,13 @@ impl<'a> FunctionTranslator<'a> {
             TerminatorKind::Return => {
                 self.emit_return();
             }
+            TerminatorKind::Drop { place: _, target, unwind } => {
+                // TODO actually drop place
+                if unwind.is_some() {
+                    panic!("unsupported unwind");
+                }
+                self.compile_mir_block(target); // TODO
+            }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
         }
     }
@@ -155,6 +172,15 @@ impl<'a> FunctionTranslator<'a> {
             StatementKind::Assign(place, rvalue) => {
                 self.translate_stmt_assign(place, rvalue);
             }
+            StatementKind::StorageLive(_local) => {
+                // FIXME anything to do here?
+            }
+            StatementKind::StorageDead(_local) => {
+                // FIXME anything to do here?
+            }
+            StatementKind::FakeRead(_place) => {
+                // FIXME anything to do here?
+            }
             _ => panic!("unsupported stmt kind: {:?}", stmt.kind),
         }
     }
@@ -164,21 +190,27 @@ impl<'a> FunctionTranslator<'a> {
         if !projection.is_empty() {
             panic!("unsupported projection");
         }
+        let variable = self.get_variable(place);
+        let value = self.translate_rvalue(rvalue);
+        self.builder.def_var(variable, value);
+    }
+
+    fn get_variable(&mut self, place: &Place) -> Variable {
         let variable = *self.variables.entry(place.local).or_insert_with(|| {
             let var = Variable::new(place.local.into_raw().into_u32() as usize);
             let t_i32 = Type::int(32).unwrap();
             self.builder.declare_var(var, t_i32);
             var
         });
-        let value = self.translate_rvalue(rvalue);
-        self.builder.def_var(variable, value);
+        variable
     }
 
     fn translate_rvalue(&mut self, rvalue: &Rvalue) -> Value {
         let value = match rvalue {
-            Rvalue::Use(operand) => {
-                self.translate_operand(operand)
-            },
+            Rvalue::Use(operand) => self.translate_operand(operand),
+            Rvalue::CheckedBinaryOp(binop, left, right) => {
+                self.translate_checked_binop(binop, left, right)
+            }
             _ => panic!("unsupported rvalue: {:?}", rvalue),
         };
         value
@@ -186,9 +218,8 @@ impl<'a> FunctionTranslator<'a> {
 
     fn translate_operand(&mut self, operand: &Operand) -> Value {
         match operand {
-            Operand::Constant(konst) => {
-                self.translate_const(konst)
-            },
+            Operand::Constant(konst) => self.translate_const(konst),
+            Operand::Copy(place) => self.translate_place_copy(place),
             _ => panic!("unsupported operand: {:?}", operand),
         }
     }
@@ -203,9 +234,30 @@ impl<'a> FunctionTranslator<'a> {
                 let t_i32 = Type::int(32).unwrap();
                 let bytes: &[u8; 4] = bytes.as_ref().try_into().unwrap();
                 self.builder.ins().iconst(t_i32, i32::from_le_bytes(*bytes) as i64)
-            },
+            }
             hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
             hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
+        }
+    }
+
+    fn translate_place_copy(&mut self, place: &Place) -> Value {
+        let variable = self.get_variable(place);
+        let projection = place.projection.lookup(&self.body.projection_store);
+        if !projection.is_empty() {
+            panic!("unsupported projection");
+        }
+        self.builder.use_var(variable)
+    }
+
+    fn translate_checked_binop(&mut self, binop: &BinOp, left: &Operand, right: &Operand) -> Value {
+        let left = self.translate_operand(left);
+        let right = self.translate_operand(right);
+        match binop {
+            BinOp::Add => {
+                // FIXME checked??
+                self.builder.ins().iadd(left, right)
+            }
+            _ => panic!("unsupported binop: {:?}", binop),
         }
     }
 }
