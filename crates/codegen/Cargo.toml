@@ -1,0 +1,32 @@
+[package]
+name = "codegen"
+version = "0.0.0"
+repository.workspace = true
+
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+base-db.workspace = true
+cranelift.workspace = true
+cranelift-module.workspace = true
+cranelift-jit.workspace = true
+cranelift-native.workspace = true
+hir-def.workspace = true
+hir-expand.workspace = true
+hir-ty.workspace = true
+syntax.workspace = true
+rustc-hash.workspace = true
+span.workspace = true
+triomphe.workspace = true
+
+anyhow.workspace = true # FIXME
+
+[dev-dependencies]
+test-utils.workspace = true
+test-fixture.workspace = true
