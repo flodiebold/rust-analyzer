@@ -6,7 +6,7 @@ mod tests;
 use anyhow::{anyhow, Context};
 use cranelift::{
     codegen,
-    prelude::{settings, AbiParam, Configurable, EntityRef, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type, Variable},
+    prelude::{settings, AbiParam, Configurable, EntityRef, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type, Value, Variable},
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, Linkage, Module};
@@ -132,56 +132,80 @@ struct FunctionTranslator<'a> {
 
 impl<'a> FunctionTranslator<'a> {
     fn compile_mir_block(&mut self, block_id: BasicBlockId) {
-        eprintln!("locals: {:?}", self.body.locals);
         let block = &self.body.basic_blocks[block_id];
         for stmt in &block.statements {
-            match &stmt.kind {
-                StatementKind::Assign(place, rvalue) => {
-                    let projection = place.projection.lookup(&self.body.projection_store);
-                    if !projection.is_empty() {
-                        panic!("unsupported projection");
-                    }
-                    let variable = *self.variables.entry(place.local).or_insert_with(|| {
-                        let var = Variable::new(place.local.into_raw().into_u32() as usize);
-                        let t_i32 = Type::int(32).unwrap();
-                        self.builder.declare_var(var, t_i32);
-                        var
-                    });
-                    let value = match rvalue {
-                        Rvalue::Use(operand) => {
-                            match operand {
-                                Operand::Constant(konst) => {
-                                    let _ty = &konst.data(Interner).ty;
-                                    let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
-                                        panic!("evaluating non concrete constant");
-                                    };
-                                    match &c.interned {
-                                        hir_ty::ConstScalar::Bytes(bytes, _mm) => {
-                                            let t_i32 = Type::int(32).unwrap();
-                                            let bytes: &[u8; 4] = bytes.as_ref().try_into().unwrap();
-                                            self.builder.ins().iconst(t_i32, i32::from_le_bytes(*bytes) as i64)
-                                        },
-                                        hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
-                                        hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
-                                    }
-                                },
-                                _ => panic!("unsupported operand: {:?}", operand),
-                            }
-                        },
-                        _ => panic!("unsupported rvalue: {:?}", rvalue),
-                    };
-                    self.builder.def_var(variable, value);
-                }
-                _ => panic!("unsupported stmt kind: {:?}", stmt.kind),
-            }
+            self.translate_stmt(stmt);
         }
         let terminator = block.terminator.as_ref().unwrap();
         match terminator.kind {
             TerminatorKind::Return => {
-                let return_var = self.builder.use_var(self.variables[return_slot()]);
-                self.builder.ins().return_(&[return_var]);
+                self.emit_return();
             }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
+        }
+    }
+
+    fn emit_return(&mut self) {
+        let return_var = self.builder.use_var(self.variables[return_slot()]);
+        self.builder.ins().return_(&[return_var]);
+    }
+
+    fn translate_stmt(&mut self, stmt: &hir_ty::mir::Statement) {
+        match &stmt.kind {
+            StatementKind::Assign(place, rvalue) => {
+                self.translate_stmt_assign(place, rvalue);
+            }
+            _ => panic!("unsupported stmt kind: {:?}", stmt.kind),
+        }
+    }
+
+    fn translate_stmt_assign(&mut self, place: &hir_ty::mir::Place, rvalue: &Rvalue) {
+        let projection = place.projection.lookup(&self.body.projection_store);
+        if !projection.is_empty() {
+            panic!("unsupported projection");
+        }
+        let variable = *self.variables.entry(place.local).or_insert_with(|| {
+            let var = Variable::new(place.local.into_raw().into_u32() as usize);
+            let t_i32 = Type::int(32).unwrap();
+            self.builder.declare_var(var, t_i32);
+            var
+        });
+        let value = self.translate_rvalue(rvalue);
+        self.builder.def_var(variable, value);
+    }
+
+    fn translate_rvalue(&mut self, rvalue: &Rvalue) -> Value {
+        let value = match rvalue {
+            Rvalue::Use(operand) => {
+                self.translate_operand(operand)
+            },
+            _ => panic!("unsupported rvalue: {:?}", rvalue),
+        };
+        value
+    }
+
+    fn translate_operand(&mut self, operand: &Operand) -> Value {
+        match operand {
+            Operand::Constant(konst) => {
+                self.translate_const(konst)
+            },
+            _ => panic!("unsupported operand: {:?}", operand),
+        }
+    }
+
+    fn translate_const(&mut self, konst: &chalk_ir::Const<Interner>) -> Value {
+        let _ty = &konst.data(Interner).ty;
+        let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
+            panic!("evaluating non concrete constant");
+        };
+        match &c.interned {
+            hir_ty::ConstScalar::Bytes(bytes, _mm) => {
+                let t_i32 = Type::int(32).unwrap();
+                let bytes: &[u8; 4] = bytes.as_ref().try_into().unwrap();
+                self.builder.ins().iconst(t_i32, i32::from_le_bytes(*bytes) as i64)
+            },
+            hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
+            hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
         }
     }
 }
