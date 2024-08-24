@@ -6,9 +6,10 @@ mod tests;
 use anyhow::{anyhow, Context};
 use cranelift::{
     codegen,
+    frontend::Switch,
     prelude::{
-        settings, AbiParam, Configurable, EntityRef, FunctionBuilder, FunctionBuilderContext,
-        InstBuilder, Type, Value, Variable,
+        settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
+        FunctionBuilderContext, InstBuilder, IntCC, Type, Value, Variable,
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
@@ -20,9 +21,10 @@ use hir_ty::{
         BasicBlockId, BinOp, LocalId, MirBody, Operand, Place, Rvalue, StatementKind,
         TerminatorKind,
     },
-    Interner, Substitution,
+    Interner, Substitution, Ty,
 };
 use la_arena::ArenaMap;
+use rustc_hash::FxHashMap;
 
 pub struct Jit {
     /// The function builder context, which is reused across multiple
@@ -78,11 +80,6 @@ impl Jit {
 
         let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
-        let entry_block = builder.create_block();
-        builder.append_block_params_for_function_params(entry_block);
-        builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
-
         let body = db
             .monomorphized_mir_body(
                 func_id.into(),
@@ -95,15 +92,20 @@ impl Jit {
             db,
             body: &body,
             variables: ArenaMap::new(),
+            blocks: ArenaMap::new(),
             builder,
             module: &mut self.module,
         };
 
-        translator.compile_mir_block(body.start_block);
+        translator.create_blocks();
+        translator
+            .builder
+            .append_block_params_for_function_params(translator.blocks[body.start_block]);
 
-        // let val = builder.ins().iconst(t_i32, 4);
-        // builder.ins().return_(&[val]);
-        // builder.finalize();
+        translator.compile_all_blocks();
+
+        translator.builder.seal_all_blocks(); // FIXME do this better
+        translator.builder.finalize();
 
         let id = self
             .module
@@ -136,18 +138,33 @@ struct FunctionTranslator<'a> {
     db: &'a dyn HirDatabase,
     body: &'a MirBody,
     variables: ArenaMap<LocalId, Variable>,
+    blocks: ArenaMap<BasicBlockId, Block>,
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
 }
 
 impl<'a> FunctionTranslator<'a> {
+    fn create_blocks(&mut self) {
+        for (block_id, _) in self.body.basic_blocks.iter() {
+            self.blocks.insert(block_id, self.builder.create_block());
+        }
+    }
+
+    fn compile_all_blocks(&mut self) {
+        let body = self.body.clone();
+        for (block_id, _) in body.basic_blocks.iter() {
+            self.compile_mir_block(block_id);
+        }
+    }
+
     fn compile_mir_block(&mut self, block_id: BasicBlockId) {
+        self.builder.switch_to_block(self.blocks[block_id]);
         let block = &self.body.basic_blocks[block_id];
         for stmt in &block.statements {
             self.translate_stmt(stmt);
         }
         let terminator = block.terminator.as_ref().unwrap();
-        match terminator.kind {
+        match &terminator.kind {
             TerminatorKind::Return => {
                 self.emit_return();
             }
@@ -156,7 +173,18 @@ impl<'a> FunctionTranslator<'a> {
                 if unwind.is_some() {
                     panic!("unsupported unwind");
                 }
-                self.compile_mir_block(target); // TODO
+                self.builder.ins().jump(self.blocks[*target], &[]);
+            }
+            TerminatorKind::SwitchInt { discr, targets } => {
+                let discr = self.translate_operand(discr);
+                let mut switch = Switch::new();
+                for (val, target) in targets.iter() {
+                    switch.set_entry(val, self.blocks[target]);
+                }
+                switch.emit(&mut self.builder, discr, self.blocks[targets.otherwise()]);
+            }
+            TerminatorKind::Goto { target } => {
+                self.builder.ins().jump(self.blocks[*target], &[]);
             }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
         }
@@ -190,16 +218,21 @@ impl<'a> FunctionTranslator<'a> {
         if !projection.is_empty() {
             panic!("unsupported projection");
         }
-        let variable = self.get_variable(place);
+        let variable = self.get_variable(place.local);
         let value = self.translate_rvalue(rvalue);
         self.builder.def_var(variable, value);
     }
 
-    fn get_variable(&mut self, place: &Place) -> Variable {
-        let variable = *self.variables.entry(place.local).or_insert_with(|| {
-            let var = Variable::new(place.local.into_raw().into_u32() as usize);
-            let t_i32 = Type::int(32).unwrap();
-            self.builder.declare_var(var, t_i32);
+    fn get_type(&mut self, ty: Ty) -> Type {
+        translate_type(ty)
+    }
+
+    fn get_variable(&mut self, local: LocalId) -> Variable {
+        let typ = self.body.locals[local].ty.clone();
+        let variable = *self.variables.entry(local).or_insert_with(|| {
+            let var = Variable::new(local.into_raw().into_u32() as usize);
+            let typ = translate_type(typ);
+            self.builder.declare_var(var, typ);
             var
         });
         variable
@@ -225,15 +258,16 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_const(&mut self, konst: &chalk_ir::Const<Interner>) -> Value {
-        let _ty = &konst.data(Interner).ty;
+        let ty = konst.data(Interner).ty.clone();
         let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
             panic!("evaluating non concrete constant");
         };
         match &c.interned {
             hir_ty::ConstScalar::Bytes(bytes, _mm) => {
-                let t_i32 = Type::int(32).unwrap();
+                let typ = translate_type(ty);
+                // FIXME handle different sizes
                 let bytes: &[u8; 4] = bytes.as_ref().try_into().unwrap();
-                self.builder.ins().iconst(t_i32, i32::from_le_bytes(*bytes) as i64)
+                self.builder.ins().iconst(typ, i32::from_le_bytes(*bytes) as i64)
             }
             hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
             hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
@@ -241,7 +275,7 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_place_copy(&mut self, place: &Place) -> Value {
-        let variable = self.get_variable(place);
+        let variable = self.get_variable(place.local);
         let projection = place.projection.lookup(&self.body.projection_store);
         if !projection.is_empty() {
             panic!("unsupported projection");
@@ -257,8 +291,44 @@ impl<'a> FunctionTranslator<'a> {
                 // FIXME checked??
                 self.builder.ins().iadd(left, right)
             }
+
+            BinOp::Eq => self.builder.ins().icmp(IntCC::Equal, left, right),
             _ => panic!("unsupported binop: {:?}", binop),
         }
+    }
+}
+
+fn translate_type(ty: Ty) -> Type {
+    use chalk_ir::{FloatTy, IntTy, TyKind, UintTy};
+    use hir_ty::Scalar;
+    match ty.kind(Interner) {
+        TyKind::Scalar(scalar_ty) => match scalar_ty {
+            Scalar::Bool => types::I8,
+            Scalar::Char => types::I32,
+            Scalar::Int(int_ty) => match int_ty {
+                IntTy::Isize => types::I64, // FIXME
+                IntTy::I8 => types::I8,
+                IntTy::I16 => types::I16,
+                IntTy::I32 => types::I32,
+                IntTy::I64 => types::I64,
+                IntTy::I128 => types::I128,
+            },
+            Scalar::Uint(uint_ty) => match uint_ty {
+                UintTy::Usize => types::I64, // FIXME
+                UintTy::U8 => types::I8,
+                UintTy::U16 => types::I16,
+                UintTy::U32 => types::I32,
+                UintTy::U64 => types::I64,
+                UintTy::U128 => types::I128,
+            },
+            Scalar::Float(float_ty) => match float_ty {
+                FloatTy::F16 => types::F16,
+                FloatTy::F32 => types::F32,
+                FloatTy::F64 => types::F64,
+                FloatTy::F128 => types::F128,
+            },
+        },
+        _ => panic!("unsupported ty: {:?}", ty),
     }
 }
 

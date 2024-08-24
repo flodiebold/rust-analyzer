@@ -78,3 +78,69 @@ fn test() -> i32 { 1 + 4 }
         5,
     )
 }
+
+#[test]
+fn test_5() {
+    check_i32(
+        r#"
+fn foo() -> i32 { 4 }
+fn test() -> i32 { 1 + foo() }
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_6() {
+    check_i32(
+        r#"
+fn test() -> i32 { if true { 5 } else { 3 } }
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_7() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    match 3 {
+        3 => 5,
+        _ => 3,
+    }
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_8() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let mut x = 3;
+    x = 5;
+    x
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_9() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let mut x = 3;
+    while x < 5 {
+        x += 1;
+    }
+    x
+}
+"#,
+        5,
+    )
+}
