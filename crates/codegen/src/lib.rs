@@ -288,12 +288,21 @@ impl<'a> FunctionTranslator<'a> {
         let left = self.translate_operand(left);
         let right = self.translate_operand(right);
         match binop {
-            BinOp::Add => {
-                // FIXME checked??
-                self.builder.ins().iadd(left, right)
-            }
+            // FIXME checked?
+            BinOp::Add => self.builder.ins().iadd(left, right),
+            BinOp::Sub => self.builder.ins().isub(left, right),
+            BinOp::Mul => self.builder.ins().imul(left, right),
+            // FIXME handle unsigned
+            BinOp::Div => self.builder.ins().sdiv(left, right),
+            BinOp::Rem => self.builder.ins().srem(left, right),
 
             BinOp::Eq => self.builder.ins().icmp(IntCC::Equal, left, right),
+            BinOp::Ne => self.builder.ins().icmp(IntCC::NotEqual, left, right),
+            // FIXME handle unsigned
+            BinOp::Lt => self.builder.ins().icmp(IntCC::SignedLessThan, left, right),
+            BinOp::Le => self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right),
+            BinOp::Gt => self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right),
+            BinOp::Ge => self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right),
             _ => panic!("unsupported binop: {:?}", binop),
         }
     }

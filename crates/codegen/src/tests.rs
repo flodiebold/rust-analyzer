@@ -133,6 +133,7 @@ fn test() -> i32 {
 fn test_9() {
     check_i32(
         r#"
+//- minicore: add
 fn test() -> i32 {
     let mut x = 3;
     while x < 5 {
