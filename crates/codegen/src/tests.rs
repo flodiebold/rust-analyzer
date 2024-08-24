@@ -144,3 +144,16 @@ fn test() -> i32 {
         5,
     )
 }
+
+// - more number types
+// - structs
+// - references
+// - arrays/slices
+// - raw pointers
+// - functions with different signatures
+// - strings
+// - extern function calls??
+// - unwinding
+// - generics
+// - dynamic calls
+// - hotswapping

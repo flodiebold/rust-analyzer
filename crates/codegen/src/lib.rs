@@ -24,7 +24,6 @@ use hir_ty::{
     Interner, Substitution, Ty,
 };
 use la_arena::ArenaMap;
-use rustc_hash::FxHashMap;
 
 pub struct Jit {
     /// The function builder context, which is reused across multiple
@@ -44,17 +43,19 @@ pub struct Jit {
     module: JITModule,
 }
 
+// FIXME: cleanup of Jit (needs to call free_memory())
+
 impl Default for Jit {
     fn default() -> Self {
         let mut flag_builder = settings::builder();
         flag_builder.set("use_colocated_libcalls", "false").unwrap();
-        flag_builder.set("is_pic", "false").unwrap();
+        flag_builder.set("is_pic", "true").unwrap(); // enable?
         let isa_builder = cranelift_native::builder().unwrap_or_else(|msg| {
             panic!("host machine is not supported: {}", msg);
         });
         let isa = isa_builder.finish(settings::Flags::new(flag_builder)).unwrap();
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        // builder.hotswap(true); // TODO what's PIC code?
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.hotswap(true);
 
         let module = JITModule::new(builder);
         Self {
@@ -78,7 +79,7 @@ impl Jit {
         let t_i32 = Type::int(32).unwrap();
         self.ctx.func.signature.returns.push(AbiParam::new(t_i32));
 
-        let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
+        let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
         let body = db
             .monomorphized_mir_body(
@@ -104,7 +105,7 @@ impl Jit {
 
         translator.compile_all_blocks();
 
-        translator.builder.seal_all_blocks(); // FIXME do this better
+        translator.builder.seal_all_blocks(); // FIXME do this better?
         translator.builder.finalize();
 
         let id = self
@@ -265,9 +266,9 @@ impl<'a> FunctionTranslator<'a> {
         match &c.interned {
             hir_ty::ConstScalar::Bytes(bytes, _mm) => {
                 let typ = translate_type(ty);
-                // FIXME handle different sizes
-                let bytes: &[u8; 4] = bytes.as_ref().try_into().unwrap();
-                self.builder.ins().iconst(typ, i32::from_le_bytes(*bytes) as i64)
+                let mut data: [u8; 8] = [0; 8];
+                data[0..bytes.len()].copy_from_slice(&bytes);
+                self.builder.ins().iconst(typ, i64::from_le_bytes(data))
             }
             hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
             hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
