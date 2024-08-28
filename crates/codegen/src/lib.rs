@@ -3,17 +3,23 @@ mod test_db;
 #[cfg(test)]
 mod tests;
 
+use std::{
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::Mutex,
+};
+
 use anyhow::{anyhow, Context};
+use base_db::salsa::InternKey;
 use cranelift::{
     codegen,
     frontend::Switch,
     prelude::{
         settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
-        FunctionBuilderContext, InstBuilder, IntCC, Type, Value, Variable,
+        FunctionBuilderContext, InstBuilder, IntCC, Signature, Type, Value, Variable,
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, Linkage, Module};
+use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use hir_def::FunctionId;
 use hir_ty::{
     db::HirDatabase,
@@ -21,9 +27,35 @@ use hir_ty::{
         BasicBlockId, BinOp, LocalId, MirBody, Operand, Place, Rvalue, StatementKind,
         TerminatorKind,
     },
-    Interner, Substitution, Ty,
+    Interner, Substitution, Ty, TyKind,
 };
 use la_arena::ArenaMap;
+use rustc_hash::FxHashMap;
+use triomphe::Arc;
+
+#[derive(Clone)]
+pub struct JitEngine<'a> {
+    jit: Arc<Mutex<Jit>>,
+    db: &'a dyn HirDatabase,
+}
+
+extern "C" fn ensure_function(engine: &JitEngine, func_id: u32) -> *const u8 {
+    let jit = engine.jit.clone();
+    let mut jit = jit.lock().unwrap();
+    let func_id = FunctionId::from_intern_id(func_id.into());
+    let code = catch_unwind(AssertUnwindSafe(|| jit.compile(engine.db, func_id, engine).unwrap()))
+        .unwrap_or_else(|err| {
+            eprintln!("failed to compile function {}: {:?}", func_id.as_intern_id().as_u32(), err);
+            std::process::abort();
+        });
+    code
+}
+
+impl<'a> JitEngine<'a> {
+    pub fn new(db: &'a dyn HirDatabase) -> JitEngine {
+        JitEngine { jit: Arc::new(Mutex::new(Jit::default())), db }
+    }
+}
 
 pub struct Jit {
     /// The function builder context, which is reused across multiple
@@ -41,6 +73,9 @@ pub struct Jit {
     /// The module, with the jit backend, which manages the JIT'd
     /// functions.
     module: JITModule,
+
+    compiled_functions: FxHashMap<FunctionId, FuncId>,
+    shims: FxHashMap<FunctionId, FuncId>,
 }
 
 // FIXME: cleanup of Jit (needs to call free_memory())
@@ -57,12 +92,19 @@ impl Default for Jit {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.hotswap(true);
 
-        let module = JITModule::new(builder);
+        let mut module = JITModule::new(builder);
+        // let mut signature = Signature::new(module.isa().default_call_conv());
+        // signature.params.push(AbiParam::new(module.isa().pointer_type()));
+        // signature.params.push(AbiParam::new(types::I32));
+        // signature.returns.push(AbiParam::new(module.isa().pointer_type()));
+        // module.declare_function("ensure_function", Linkage::Import, &signature).unwrap();
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
             data_description: DataDescription::new(),
             module,
+            compiled_functions: FxHashMap::default(),
+            shims: FxHashMap::default(),
         }
     }
 }
@@ -72,12 +114,23 @@ impl Jit {
         &mut self,
         db: &dyn HirDatabase,
         func_id: FunctionId,
+        jit_engine: &JitEngine,
     ) -> Result<*const u8, anyhow::Error> {
-        // 1. get MIR for func
-        // 2. generate code, compiling dependent functions as necessary
+        if let Some(f) = self.compiled_functions.get(&func_id) {
+            // FIXME check for changes to the function since the last compilation
+            // FIXME also cache error?
+            return Ok(self.module.get_finalized_function(*f));
+        }
 
-        let t_i32 = Type::int(32).unwrap();
-        self.ctx.func.signature.returns.push(AbiParam::new(t_i32));
+        let data = db.function_data(func_id);
+        eprintln!(
+            "Compiling function {} ({})",
+            func_id.as_intern_id().as_u32(),
+            data.name.as_str()
+        );
+
+        // FIXME allow all signatures
+        self.ctx.func.signature.returns.push(AbiParam::new(types::I32));
 
         let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
@@ -96,6 +149,8 @@ impl Jit {
             blocks: ArenaMap::new(),
             builder,
             module: &mut self.module,
+            shims: &mut self.shims,
+            engine: jit_engine,
         };
 
         translator.create_blocks();
@@ -110,8 +165,11 @@ impl Jit {
 
         let id = self
             .module
-            .declare_function("test", Linkage::Export, &self.ctx.func.signature)
+            // FIXME declare with name and linkage?
+            .declare_anonymous_function(&self.ctx.func.signature)
             .context("failed to declare function")?;
+
+        self.compiled_functions.insert(func_id, id);
 
         // Define the function to jit. This finishes compilation, although
         // there may be outstanding relocations to perform. Currently, jit
@@ -142,9 +200,55 @@ struct FunctionTranslator<'a> {
     blocks: ArenaMap<BasicBlockId, Block>,
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
+    shims: &'a mut FxHashMap<FunctionId, FuncId>,
+    engine: &'a JitEngine<'a>,
 }
 
 impl<'a> FunctionTranslator<'a> {
+    fn get_shim(&mut self, func: FunctionId) -> FuncId {
+        if let Some(shim) = self.shims.get(&func) {
+            return *shim;
+        }
+
+        let mut ctx = self.module.make_context(); // FIXME share
+                                                  // FIXME allow any signature
+        ctx.func.signature.returns.push(AbiParam::new(types::I32));
+
+        let sig = ctx.func.signature.clone();
+
+        let id = self.module.declare_anonymous_function(&ctx.func.signature).unwrap(); // FIXME
+
+        let mut builder_context = FunctionBuilderContext::new(); // FIXME share
+        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+
+        let mut signature = Signature::new(self.module.isa().default_call_conv());
+        let ptr = self.module.isa().pointer_type();
+        signature.params.push(AbiParam::new(ptr));
+        signature.params.push(AbiParam::new(types::I32));
+        signature.returns.push(AbiParam::new(ptr));
+        let sig_ref = builder.import_signature(signature);
+
+        let block = builder.create_block();
+        builder.switch_to_block(block);
+        // FIXME can we pass engine and address of ensure_function as "global value" / "VM context pointer"?
+        let arg1 = builder.ins().iconst(ptr, self.engine as *const JitEngine as i64);
+        let arg2 = builder.ins().iconst(types::I32, func.as_intern_id().as_u32() as i64);
+        let callee = builder.ins().iconst(ptr, ensure_function as usize as i64);
+        let call = builder.ins().call_indirect(sig_ref, callee, &[arg1, arg2]);
+        let result = builder.inst_results(call)[0];
+
+        let sig_ref = builder.import_signature(sig);
+        let call = builder.ins().call_indirect(sig_ref, result, &[]);
+        let rvals = builder.inst_results(call).to_vec();
+        builder.ins().return_(&rvals);
+        // tail call doesn't work in SystemV callconv, but we might want another one anyway?
+        // builder.ins().return_call_indirect(sig_ref, result, &[]);
+        builder.seal_all_blocks();
+        builder.finalize();
+        self.module.define_function(id, &mut ctx).unwrap();
+        id
+    }
+
     fn create_blocks(&mut self) {
         for (block_id, _) in self.body.basic_blocks.iter() {
             self.blocks.insert(block_id, self.builder.create_block());
@@ -186,6 +290,52 @@ impl<'a> FunctionTranslator<'a> {
             }
             TerminatorKind::Goto { target } => {
                 self.builder.ins().jump(self.blocks[*target], &[]);
+            }
+            TerminatorKind::Call { func, args, destination, target, cleanup, from_hir_call: _ } => {
+                if cleanup.is_some() {
+                    panic!("unsupported unwind");
+                }
+
+                let args: Vec<_> = args.iter().map(|a| self.translate_operand(a)).collect();
+                let static_func_id = match func {
+                    Operand::Constant(konst) => match konst.data(Interner).ty.kind(Interner) {
+                        TyKind::FnDef(func_id, subst) => {
+                            if !subst.is_empty(Interner) {
+                                panic!("unsupported generic function call")
+                            }
+                            let callable_def =
+                                self.db.lookup_intern_callable_def((*func_id).into());
+                            match callable_def {
+                                hir_def::CallableDefId::FunctionId(func_id) => Some(func_id),
+                                _ => {
+                                    panic!("unsupported struct/enum constructor");
+                                }
+                            }
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                // FIXME order of operations? first args or first func?
+
+                if let Some(func_id) = static_func_id {
+                    let shim = self.get_shim(func_id);
+                    let func_ref = self.module.declare_func_in_func(shim, &mut self.builder.func);
+                    let call = self.builder.ins().call(func_ref, &args);
+                    let result = self.builder.inst_results(call)[0];
+                    let projection = destination.projection.lookup(&self.body.projection_store);
+                    if !projection.is_empty() {
+                        panic!("unsupported projection");
+                    }
+                    let variable = self.get_variable(destination.local);
+                    self.builder.def_var(variable, result);
+                    if let Some(target) = target {
+                        self.builder.ins().jump(self.blocks[*target], &[]);
+                    }
+                } else {
+                    let _func = self.translate_operand(func);
+                    panic!("unsupported indirect call");
+                }
             }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
         }
