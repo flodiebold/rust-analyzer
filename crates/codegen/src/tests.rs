@@ -80,7 +80,7 @@ fn test() -> i32 { 1 + 4 }
 }
 
 #[test]
-fn test_5() {
+fn test_function_call() {
     check_i32(
         r#"
 fn foo() -> i32 { 4 }
@@ -91,7 +91,7 @@ fn test() -> i32 { 1 + foo() }
 }
 
 #[test]
-fn test_6() {
+fn test_if_else() {
     check_i32(
         r#"
 fn test() -> i32 { if true { 5 } else { 3 } }
@@ -101,7 +101,7 @@ fn test() -> i32 { if true { 5 } else { 3 } }
 }
 
 #[test]
-fn test_7() {
+fn test_match() {
     check_i32(
         r#"
 fn test() -> i32 {
@@ -116,7 +116,7 @@ fn test() -> i32 {
 }
 
 #[test]
-fn test_8() {
+fn test_mut_assign() {
     check_i32(
         r#"
 fn test() -> i32 {
@@ -130,7 +130,7 @@ fn test() -> i32 {
 }
 
 #[test]
-fn test_9() {
+fn test_while_loop() {
     check_i32(
         r#"
 //- minicore: add
@@ -147,12 +147,41 @@ fn test() -> i32 {
 }
 
 #[test]
-fn test_10() {
+fn test_function_param() {
     check_i32(
         r#"
 fn foo(x: i32) -> i32 { x + 5 }
 fn test() -> i32 { 1 + foo(7) }
 "#,
         13,
+    )
+}
+
+#[test]
+fn test_ref() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let x = 3;
+    let r = &x;
+    *r
+}
+"#,
+        3,
+    )
+}
+
+#[test]
+fn test_mut_ref() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let mut x = 3;
+    let r = &mut x;
+    *r = 5;
+    x
+}
+"#,
+        5,
     )
 }

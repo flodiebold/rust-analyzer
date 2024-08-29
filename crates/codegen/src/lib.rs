@@ -11,11 +11,13 @@ use std::{
 use anyhow::{anyhow, Context};
 use base_db::salsa::InternKey;
 use cranelift::{
-    codegen,
+    codegen::{self, ir::StackSlot},
     frontend::Switch,
     prelude::{
-        isa::CallConv, settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
-        FunctionBuilderContext, InstBuilder, IntCC, Signature, Type, Value, Variable,
+        isa::{CallConv, TargetIsa},
+        settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
+        FunctionBuilderContext, InstBuilder, IntCC, MemFlags, Signature, StackSlotData, Type,
+        Value, Variable,
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
@@ -24,10 +26,10 @@ use hir_def::FunctionId;
 use hir_ty::{
     db::HirDatabase,
     mir::{
-        BasicBlockId, BinOp, LocalId, MirBody, Operand, Place, Rvalue, StatementKind,
-        TerminatorKind,
+        BasicBlockId, BinOp, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
+        StatementKind, TerminatorKind,
     },
-    Interner, Substitution, Ty, TyKind,
+    Interner, Substitution, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
@@ -134,7 +136,7 @@ impl Jit {
             panic!("unsupported generic func");
         }
 
-        self.ctx.func.signature = translate_signature(&sig);
+        self.ctx.func.signature = translate_signature(&sig, self.module.isa());
 
         let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
@@ -198,12 +200,18 @@ impl Jit {
 struct FunctionTranslator<'a> {
     db: &'a dyn HirDatabase,
     body: &'a MirBody,
-    variables: ArenaMap<LocalId, Variable>,
+    variables: ArenaMap<LocalId, LocalKind>,
     blocks: ArenaMap<BasicBlockId, Block>,
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
     shims: &'a mut FxHashMap<FunctionId, FuncId>,
     engine: &'a JitEngine<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum LocalKind {
+    Variable(Variable),
+    Stack(StackSlot),
 }
 
 impl<'a> FunctionTranslator<'a> {
@@ -219,7 +227,7 @@ impl<'a> FunctionTranslator<'a> {
         }
 
         let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
-        ctx.func.signature = translate_signature(&sig);
+        ctx.func.signature = translate_signature(&sig, self.module.isa());
 
         let sig = ctx.func.signature.clone();
 
@@ -243,6 +251,7 @@ impl<'a> FunctionTranslator<'a> {
         builder.switch_to_block(block);
         builder.append_block_params_for_function_params(block);
         // FIXME can we pass engine and address of ensure_function as "global value" / "VM context pointer"?
+        // FIXME also maybe just import the function? if that works? (need to declare it as exported though)
         let arg1 = builder.ins().iconst(ptr, self.engine as *const JitEngine as i64);
         let arg2 = builder.ins().iconst(types::I32, func.as_intern_id().as_u32() as i64);
         let callee = builder.ins().iconst(ptr, ensure_function as usize as i64);
@@ -282,8 +291,7 @@ impl<'a> FunctionTranslator<'a> {
         self.builder.switch_to_block(block);
         let param_values = self.builder.block_params(block).to_vec();
         for (param, val) in self.body.param_locals.iter().copied().zip(param_values) {
-            let var = self.get_variable(param);
-            self.builder.def_var(var, val);
+            self.translate_local_store(param, val);
         }
     }
 
@@ -350,10 +358,9 @@ impl<'a> FunctionTranslator<'a> {
                     let result = self.builder.inst_results(call)[0];
                     let projection = destination.projection.lookup(&self.body.projection_store);
                     if !projection.is_empty() {
-                        panic!("unsupported projection");
+                        panic!("unsupported projection in function return");
                     }
-                    let variable = self.get_variable(destination.local);
-                    self.builder.def_var(variable, result);
+                    self.translate_local_store(destination.local, result);
                     if let Some(target) = target {
                         self.builder.ins().jump(self.blocks[*target], &[]);
                     }
@@ -367,7 +374,7 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn emit_return(&mut self) {
-        let return_var = self.builder.use_var(self.variables[return_slot()]);
+        let return_var = self.translate_local_access(return_slot());
         self.builder.ins().return_(&[return_var]);
     }
 
@@ -390,24 +397,54 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_stmt_assign(&mut self, place: &hir_ty::mir::Place, rvalue: &Rvalue) {
-        let projection = place.projection.lookup(&self.body.projection_store);
-        if !projection.is_empty() {
-            panic!("unsupported projection");
-        }
-        let variable = self.get_variable(place.local);
         let value = self.translate_rvalue(rvalue);
-        self.builder.def_var(variable, value);
+        let projection = place.projection.lookup(&self.body.projection_store);
+        match projection {
+            [] => self.translate_local_store(place.local, value),
+            [tail @ .., last] => {
+                let addr = self.translate_local_access(place.local);
+                if tail.len() > 0 {
+                    panic!("unsupported more than one projection elem in assign");
+                }
+                match last {
+                    ProjectionElem::Deref => {
+                        let mem_flags = MemFlags::trusted();
+                        self.builder.ins().store(mem_flags, value, addr, 0);
+                    }
+                    _ => panic!("unsupported projection elem in assign: {:?}", last),
+                }
+            }
+        }
     }
 
-    fn get_variable(&mut self, local: LocalId) -> Variable {
+    fn get_variable(&mut self, local: LocalId) -> LocalKind {
         let typ = self.body.locals[local].ty.clone();
         let variable = *self.variables.entry(local).or_insert_with(|| {
             let var = Variable::new(local.into_raw().into_u32() as usize);
-            let typ = translate_type(typ);
+            let typ = translate_type(typ, self.module.isa());
             self.builder.declare_var(var, typ);
-            var
+            LocalKind::Variable(var)
         });
         variable
+    }
+
+    fn spill_to_stack(&mut self, local: LocalId) -> StackSlot {
+        let current = self.get_variable(local);
+        match current {
+            LocalKind::Variable(var) => {
+                let typ = self.body.locals[local].ty.clone();
+                let slot = self.builder.create_sized_stack_slot(StackSlotData {
+                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
+                    size: translate_type(typ, self.module.isa()).bytes(),
+                    align_shift: 3, // FIXME alignment!
+                });
+                let val = self.builder.use_var(var);
+                self.builder.ins().stack_store(val, slot, 0);
+                self.variables[local] = LocalKind::Stack(slot);
+                slot
+            }
+            LocalKind::Stack(slot) => slot,
+        }
     }
 
     fn translate_rvalue(&mut self, rvalue: &Rvalue) -> Value {
@@ -415,6 +452,16 @@ impl<'a> FunctionTranslator<'a> {
             Rvalue::Use(operand) => self.translate_operand(operand),
             Rvalue::CheckedBinaryOp(binop, left, right) => {
                 self.translate_checked_binop(binop, left, right)
+            }
+            Rvalue::Ref(_, place) => {
+                let projection = place.projection.lookup(&self.body.projection_store);
+                if !projection.is_empty() {
+                    panic!("unsupported projection in rvalue");
+                }
+                let stack_slot = self.spill_to_stack(place.local);
+                let typ = self.module.isa().pointer_type();
+                let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);
+                addr
             }
             _ => panic!("unsupported rvalue: {:?}", rvalue),
         };
@@ -436,7 +483,7 @@ impl<'a> FunctionTranslator<'a> {
         };
         match &c.interned {
             hir_ty::ConstScalar::Bytes(bytes, _mm) => {
-                let typ = translate_type(ty);
+                let typ = translate_type(ty, self.module.isa());
                 let mut data: [u8; 8] = [0; 8];
                 data[0..bytes.len()].copy_from_slice(&bytes);
                 self.builder.ins().iconst(typ, i64::from_le_bytes(data))
@@ -447,12 +494,49 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_place_copy(&mut self, place: &Place) -> Value {
+        let mut ty = self.body.locals[place.local].ty.clone();
         let variable = self.get_variable(place.local);
         let projection = place.projection.lookup(&self.body.projection_store);
-        if !projection.is_empty() {
-            panic!("unsupported projection");
+        let mut val = match variable {
+            LocalKind::Variable(var) => self.builder.use_var(var),
+            LocalKind::Stack(slot) => self.builder.ins().stack_load(
+                translate_type(ty.clone(), self.module.isa()),
+                slot,
+                0,
+            ),
+        };
+        for proj in projection {
+            match proj {
+                ProjectionElem::Deref => {
+                    ty = ty.as_reference_or_ptr().expect("non-ptr type derefed").0.clone();
+                    let mem_flags = MemFlags::trusted();
+                    val = self.builder.ins().load(
+                        translate_type(ty.clone(), self.module.isa()),
+                        mem_flags,
+                        val,
+                        0,
+                    );
+                }
+                _ => panic!("unsupported projection elem in copy: {:?}", proj),
+            }
         }
-        self.builder.use_var(variable)
+        val
+    }
+
+    fn translate_local_access(&mut self, local: LocalId) -> Value {
+        let variable = self.get_variable(local);
+        match variable {
+            LocalKind::Variable(var) => self.builder.use_var(var),
+            LocalKind::Stack(_) => panic!("unimplemented stack slot access"),
+        }
+    }
+
+    fn translate_local_store(&mut self, local: LocalId, value: Value) {
+        let variable = self.get_variable(local);
+        match variable {
+            LocalKind::Variable(var) => self.builder.def_var(var, value),
+            LocalKind::Stack(_) => panic!("unimplemented stack slot store"),
+        }
     }
 
     fn translate_checked_binop(&mut self, binop: &BinOp, left: &Operand, right: &Operand) -> Value {
@@ -479,18 +563,20 @@ impl<'a> FunctionTranslator<'a> {
     }
 }
 
-fn translate_signature(sig: &hir_ty::CallableSig) -> Signature {
+fn translate_signature(sig: &hir_ty::CallableSig, isa: &dyn TargetIsa) -> Signature {
     let call_conv = match sig.abi() {
         hir_ty::FnAbi::Rust => CallConv::Fast,
         _ => panic!("unsupported ABI: {:?}", sig.abi()),
     };
     let mut signature = Signature::new(call_conv);
-    signature.params.extend(sig.params().iter().cloned().map(translate_type).map(AbiParam::new));
-    signature.returns.push(AbiParam::new(translate_type(sig.ret().clone())));
+    signature
+        .params
+        .extend(sig.params().iter().map(|t| translate_type(t.clone(), isa)).map(AbiParam::new));
+    signature.returns.push(AbiParam::new(translate_type(sig.ret().clone(), isa)));
     signature
 }
 
-fn translate_type(ty: Ty) -> Type {
+fn translate_type(ty: Ty, isa: &dyn TargetIsa) -> Type {
     use chalk_ir::{FloatTy, IntTy, TyKind, UintTy};
     use hir_ty::Scalar;
     match ty.kind(Interner) {
@@ -520,6 +606,9 @@ fn translate_type(ty: Ty) -> Type {
                 FloatTy::F128 => types::F128,
             },
         },
+        // FIXME fat pointers
+        TyKind::Ref(_, _, _) => isa.pointer_type(),
+        TyKind::Raw(_, _) => isa.pointer_type(),
         _ => panic!("unsupported ty: {:?}", ty),
     }
 }
