@@ -26,7 +26,7 @@ use hir_def::FunctionId;
 use hir_ty::{
     db::HirDatabase,
     mir::{
-        BasicBlockId, BinOp, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
+        BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind,
     },
     Interner, Substitution, Ty, TyExt, TyKind,
@@ -483,6 +483,17 @@ impl<'a> FunctionTranslator<'a> {
                     _ => {
                         panic!("unsupported projection in rvalue: {:?}", projection);
                     }
+                }
+            }
+            Rvalue::Cast(kind, operand, _ty) => {
+                use hir_ty::PointerCast::*;
+                let value = self.translate_operand(operand);
+                match kind {
+                    CastKind::Pointer(UnsafeFnPointer | MutToConstPointer | ArrayToPointer) => {
+                        // nothing to do here
+                        value
+                    }
+                    _ => panic!("unsupported cast: {:?}", kind),
                 }
             }
             _ => panic!("unsupported rvalue: {:?}", rvalue),

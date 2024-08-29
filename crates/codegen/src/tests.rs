@@ -200,3 +200,18 @@ fn test() -> i32 {
         5,
     )
 }
+
+#[test]
+fn test_raw_ptr() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let mut x = 3;
+    let r = &mut x as *mut i32;
+    *r = 5;
+    x
+}
+"#,
+        5,
+    )
+}
