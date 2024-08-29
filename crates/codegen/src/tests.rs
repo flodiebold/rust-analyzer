@@ -2,7 +2,7 @@ use hir_def::db::DefDatabase;
 use span::{Edition, EditionedFileId};
 use test_fixture::WithFixture;
 
-use crate::{test_db::TestDB, Jit, JitEngine};
+use crate::{test_db::TestDB, JitEngine};
 
 fn eval_fn_i32(db: &TestDB, file_id: EditionedFileId) -> Result<i32, String> {
     let module_id = db.module_for_file(file_id);
@@ -146,3 +146,13 @@ fn test() -> i32 {
     )
 }
 
+#[test]
+fn test_10() {
+    check_i32(
+        r#"
+fn foo(x: i32) -> i32 { x + 5 }
+fn test() -> i32 { 1 + foo(7) }
+"#,
+        13,
+    )
+}

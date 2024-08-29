@@ -14,12 +14,12 @@ use cranelift::{
     codegen,
     frontend::Switch,
     prelude::{
-        settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
+        isa::CallConv, settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
         FunctionBuilderContext, InstBuilder, IntCC, Signature, Type, Value, Variable,
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, FuncId, Module};
 use hir_def::FunctionId;
 use hir_ty::{
     db::HirDatabase,
@@ -128,9 +128,13 @@ impl Jit {
             func_id.as_intern_id().as_u32(),
             data.name.as_str()
         );
+        let (sig, binders) =
+            db.callable_item_signature(func_id.into()).into_value_and_skipped_binders();
+        if !binders.is_empty(Interner) {
+            panic!("unsupported generic func");
+        }
 
-        // FIXME allow all signatures
-        self.ctx.func.signature.returns.push(AbiParam::new(types::I32));
+        self.ctx.func.signature = translate_signature(&sig);
 
         let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
@@ -154,9 +158,7 @@ impl Jit {
         };
 
         translator.create_blocks();
-        translator
-            .builder
-            .append_block_params_for_function_params(translator.blocks[body.start_block]);
+        translator.compile_function_init();
 
         translator.compile_all_blocks();
 
@@ -210,13 +212,22 @@ impl<'a> FunctionTranslator<'a> {
             return *shim;
         }
 
-        let mut ctx = self.module.make_context(); // FIXME share
-                                                  // FIXME allow any signature
-        ctx.func.signature.returns.push(AbiParam::new(types::I32));
+        let (sig, binders) =
+            self.db.callable_item_signature(func.into()).into_value_and_skipped_binders();
+        if !binders.is_empty(Interner) {
+            panic!("unsupported generic func");
+        }
+
+        let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
+        ctx.func.signature = translate_signature(&sig);
 
         let sig = ctx.func.signature.clone();
 
-        let id = self.module.declare_anonymous_function(&ctx.func.signature).unwrap(); // FIXME
+        // FIXME can this legitimately fail?
+        let id = self
+            .module
+            .declare_anonymous_function(&ctx.func.signature)
+            .expect("failed to declare anonymous function for shim");
 
         let mut builder_context = FunctionBuilderContext::new(); // FIXME share
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
@@ -230,6 +241,7 @@ impl<'a> FunctionTranslator<'a> {
 
         let block = builder.create_block();
         builder.switch_to_block(block);
+        builder.append_block_params_for_function_params(block);
         // FIXME can we pass engine and address of ensure_function as "global value" / "VM context pointer"?
         let arg1 = builder.ins().iconst(ptr, self.engine as *const JitEngine as i64);
         let arg2 = builder.ins().iconst(types::I32, func.as_intern_id().as_u32() as i64);
@@ -238,14 +250,16 @@ impl<'a> FunctionTranslator<'a> {
         let result = builder.inst_results(call)[0];
 
         let sig_ref = builder.import_signature(sig);
-        let call = builder.ins().call_indirect(sig_ref, result, &[]);
+        let args = builder.block_params(block).to_vec();
+        let call = builder.ins().call_indirect(sig_ref, result, &args);
         let rvals = builder.inst_results(call).to_vec();
         builder.ins().return_(&rvals);
         // tail call doesn't work in SystemV callconv, but we might want another one anyway?
         // builder.ins().return_call_indirect(sig_ref, result, &[]);
         builder.seal_all_blocks();
         builder.finalize();
-        self.module.define_function(id, &mut ctx).unwrap();
+        // FIXME can this legitimately fail?
+        self.module.define_function(id, &mut ctx).expect("failed to compile shim function");
         id
     }
 
@@ -259,6 +273,17 @@ impl<'a> FunctionTranslator<'a> {
         let body = self.body.clone();
         for (block_id, _) in body.basic_blocks.iter() {
             self.compile_mir_block(block_id);
+        }
+    }
+
+    fn compile_function_init(&mut self) {
+        let block = self.blocks[self.body.start_block];
+        self.builder.append_block_params_for_function_params(block);
+        self.builder.switch_to_block(block);
+        let param_values = self.builder.block_params(block).to_vec();
+        for (param, val) in self.body.param_locals.iter().copied().zip(param_values) {
+            let var = self.get_variable(param);
+            self.builder.def_var(var, val);
         }
     }
 
@@ -374,10 +399,6 @@ impl<'a> FunctionTranslator<'a> {
         self.builder.def_var(variable, value);
     }
 
-    fn get_type(&mut self, ty: Ty) -> Type {
-        translate_type(ty)
-    }
-
     fn get_variable(&mut self, local: LocalId) -> Variable {
         let typ = self.body.locals[local].ty.clone();
         let variable = *self.variables.entry(local).or_insert_with(|| {
@@ -456,6 +477,17 @@ impl<'a> FunctionTranslator<'a> {
             _ => panic!("unsupported binop: {:?}", binop),
         }
     }
+}
+
+fn translate_signature(sig: &hir_ty::CallableSig) -> Signature {
+    let call_conv = match sig.abi() {
+        hir_ty::FnAbi::Rust => CallConv::Fast,
+        _ => panic!("unsupported ABI: {:?}", sig.abi()),
+    };
+    let mut signature = Signature::new(call_conv);
+    signature.params.extend(sig.params().iter().cloned().map(translate_type).map(AbiParam::new));
+    signature.returns.push(AbiParam::new(translate_type(sig.ret().clone())));
+    signature
 }
 
 fn translate_type(ty: Ty) -> Type {
