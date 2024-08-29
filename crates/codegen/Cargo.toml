@@ -25,6 +25,7 @@ syntax.workspace = true
 rustc-hash.workspace = true
 span.workspace = true
 triomphe.workspace = true
+smallvec.workspace = true
 
 chalk-ir.workspace = true
 

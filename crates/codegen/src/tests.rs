@@ -185,3 +185,18 @@ fn test() -> i32 {
         5,
     )
 }
+
+#[test]
+fn test_mut_ref_through_func() {
+    check_i32(
+        r#"
+fn mutate(r: &mut i32) { *r = 5; }
+fn test() -> i32 {
+    let mut x = 3;
+    mutate(&mut x);
+    x
+}
+"#,
+        5,
+    )
+}

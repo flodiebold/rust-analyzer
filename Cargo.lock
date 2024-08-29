@@ -252,6 +252,7 @@ dependencies = [
  "hir-ty",
  "la-arena 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "rustc-hash",
+ "smallvec",
  "span",
  "syntax",
  "test-fixture",

@@ -33,6 +33,7 @@ use hir_ty::{
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 use triomphe::Arc;
 
 #[derive(Clone)]
@@ -355,12 +356,16 @@ impl<'a> FunctionTranslator<'a> {
                     let shim = self.get_shim(func_id);
                     let func_ref = self.module.declare_func_in_func(shim, &mut self.builder.func);
                     let call = self.builder.ins().call(func_ref, &args);
-                    let result = self.builder.inst_results(call)[0];
-                    let projection = destination.projection.lookup(&self.body.projection_store);
-                    if !projection.is_empty() {
-                        panic!("unsupported projection in function return");
+                    match self.builder.inst_results(call).len() {
+                        1 => {
+                            let result = self.builder.inst_results(call)[0];
+                            self.translate_place_store(destination, result);
+                        }
+                        0 => {}
+                        _ => {
+                            panic!("unsupported multiple returns");
+                        }
                     }
-                    self.translate_local_store(destination.local, result);
                     if let Some(target) = target {
                         self.builder.ins().jump(self.blocks[*target], &[]);
                     }
@@ -374,8 +379,14 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn emit_return(&mut self) {
-        let return_var = self.translate_local_access(return_slot());
-        self.builder.ins().return_(&[return_var]);
+        let types =
+            translate_type_for_calls(self.body.locals[return_slot()].ty.clone(), self.module.isa());
+        let returns = match types.len() {
+            0 => Vec::new(),
+            1 => [self.translate_local_access(return_slot())].to_vec(),
+            _ => panic!("unsupported multiple returns"),
+        };
+        self.builder.ins().return_(&returns);
     }
 
     fn translate_stmt(&mut self, stmt: &hir_ty::mir::Statement) {
@@ -396,8 +407,12 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn translate_stmt_assign(&mut self, place: &hir_ty::mir::Place, rvalue: &Rvalue) {
+    fn translate_stmt_assign(&mut self, place: &Place, rvalue: &Rvalue) {
         let value = self.translate_rvalue(rvalue);
+        self.translate_place_store(place, value)
+    }
+
+    fn translate_place_store(&mut self, place: &Place, value: Value) {
         let projection = place.projection.lookup(&self.body.projection_store);
         match projection {
             [] => self.translate_local_store(place.local, value),
@@ -455,13 +470,20 @@ impl<'a> FunctionTranslator<'a> {
             }
             Rvalue::Ref(_, place) => {
                 let projection = place.projection.lookup(&self.body.projection_store);
-                if !projection.is_empty() {
-                    panic!("unsupported projection in rvalue");
+                match projection {
+                    [] => {
+                        let stack_slot = self.spill_to_stack(place.local);
+                        let typ = self.module.isa().pointer_type();
+                        let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);
+                        addr
+                    }
+                    [rest @ .., ProjectionElem::Deref] => {
+                        self.translate_copy_local_with_projection(place.local, rest)
+                    }
+                    _ => {
+                        panic!("unsupported projection in rvalue: {:?}", projection);
+                    }
                 }
-                let stack_slot = self.spill_to_stack(place.local);
-                let typ = self.module.isa().pointer_type();
-                let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);
-                addr
             }
             _ => panic!("unsupported rvalue: {:?}", rvalue),
         };
@@ -494,9 +516,18 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_place_copy(&mut self, place: &Place) -> Value {
-        let mut ty = self.body.locals[place.local].ty.clone();
-        let variable = self.get_variable(place.local);
         let projection = place.projection.lookup(&self.body.projection_store);
+        let local = place.local;
+        self.translate_copy_local_with_projection(local, projection)
+    }
+
+    fn translate_copy_local_with_projection(
+        &mut self,
+        local: LocalId,
+        projection: &[ProjectionElem<LocalId, Ty>],
+    ) -> Value {
+        let mut ty = self.body.locals[local].ty.clone();
+        let variable = self.get_variable(local);
         let mut val = match variable {
             LocalKind::Variable(var) => self.builder.use_var(var),
             LocalKind::Stack(slot) => self.builder.ins().stack_load(
@@ -572,14 +603,16 @@ fn translate_signature(sig: &hir_ty::CallableSig, isa: &dyn TargetIsa) -> Signat
     signature
         .params
         .extend(sig.params().iter().map(|t| translate_type(t.clone(), isa)).map(AbiParam::new));
-    signature.returns.push(AbiParam::new(translate_type(sig.ret().clone(), isa)));
+    signature
+        .returns
+        .extend(translate_type_for_calls(sig.ret().clone(), isa).into_iter().map(AbiParam::new));
     signature
 }
 
-fn translate_type(ty: Ty, isa: &dyn TargetIsa) -> Type {
+fn translate_type_for_calls(ty: Ty, isa: &dyn TargetIsa) -> SmallVec<[Type; 1]> {
     use chalk_ir::{FloatTy, IntTy, TyKind, UintTy};
     use hir_ty::Scalar;
-    match ty.kind(Interner) {
+    let single_ty = match ty.kind(Interner) {
         TyKind::Scalar(scalar_ty) => match scalar_ty {
             Scalar::Bool => types::I8,
             Scalar::Char => types::I32,
@@ -609,7 +642,18 @@ fn translate_type(ty: Ty, isa: &dyn TargetIsa) -> Type {
         // FIXME fat pointers
         TyKind::Ref(_, _, _) => isa.pointer_type(),
         TyKind::Raw(_, _) => isa.pointer_type(),
+        TyKind::Tuple(0, _) => return SmallVec::new(),
         _ => panic!("unsupported ty: {:?}", ty),
+    };
+    SmallVec::from_buf([single_ty])
+}
+
+fn translate_type(ty: Ty, isa: &dyn TargetIsa) -> Type {
+    let typ = translate_type_for_calls(ty.clone(), isa);
+    if typ.len() == 1 {
+        typ[0]
+    } else {
+        panic!("unsupported ty: {:?}", ty)
     }
 }
 
