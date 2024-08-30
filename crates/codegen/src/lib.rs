@@ -472,6 +472,7 @@ impl<'a> FunctionTranslator<'a> {
                 let projection = place.projection.lookup(&self.body.projection_store);
                 match projection {
                     [] => {
+                        // FIXME spilling on demand like this won't work properly, I think?
                         let stack_slot = self.spill_to_stack(place.local);
                         let typ = self.module.isa().pointer_type();
                         let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);

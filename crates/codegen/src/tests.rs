@@ -215,3 +215,111 @@ fn test() -> i32 {
         5,
     )
 }
+
+#[test]
+fn test_array_literal() {
+    check_i32(
+        r#"
+//- minicore: index
+fn test() -> i32 {
+    let a = [2i32, 3];
+    a[0] + a[1]
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_slice() {
+    check_i32(
+        r#"
+//- minicore: index, slice, coerce_unsized
+fn test() -> i32 {
+    let a: &[i32] = &[2, 3];
+    a[0] + a[1]
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+#[ignore]
+fn test_str_literal() {
+    check_i32(
+        r#"
+//- minicore: index, slice, str
+extern "rust-intrinsic" {
+    #[rustc_nounwind]
+    pub fn transmute<Src, Dst>(src: Src) -> Dst;
+}
+fn test() -> i32 {
+    let s = "hello";
+    let bytes: &[u8] = transmute::<&str, &[u8]>(s);
+    let byte: u8 = bytes[0];
+    byte as i32
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+#[ignore]
+fn test_tuple_1() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let t = (2, 3);
+    t.0 + t.1
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+#[ignore]
+fn test_tuple_2() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let t = (2, 3);
+    let (a, b) = t;
+    a + b
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+#[ignore]
+fn test_struct() {
+    check_i32(
+        r#"
+struct S { a: i32, b: i32 }
+fn test() -> i32 {
+    let s = S { a: 3, b: 2 };
+    s.a + s.b
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+#[ignore]
+fn test_generic_call() {
+    check_i32(
+        r#"
+fn id<T>(t: T) -> T { t }
+fn test() -> i32 {
+    let (a, b) = id((id(2), id(3)));
+    a + b
+}
+"#,
+        5,
+    )
+}
