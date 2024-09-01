@@ -187,6 +187,26 @@ fn test() -> i32 {
 }
 
 #[test]
+#[ignore]
+fn test_mut_ref_in_loop() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let mut x = 3;
+    let mut y = 0;
+    while y < 2 {
+        let r = &mut x;
+        *r = *r + 1;
+        y = y + 1;
+    }
+    x
+}
+"#,
+        5,
+    )
+}
+
+#[test]
 fn test_mut_ref_through_func() {
     check_i32(
         r#"
@@ -238,6 +258,36 @@ fn test_slice() {
 fn test() -> i32 {
     let a: &[i32] = &[2, 3];
     a[0] + a[1]
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_array_assign() {
+    check_i32(
+        r#"
+//- minicore: index, slice
+fn test() -> i32 {
+    let mut a = [2i32, 1];
+    a[1] = 3;
+    a[0] + a[1]
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_array_elem_ref() {
+    check_i32(
+        r#"
+//- minicore: index, slice
+fn test() -> i32 {
+    let a = [1i32, 5];
+    let b = &a[1];
+    *b
 }
 "#,
         5,

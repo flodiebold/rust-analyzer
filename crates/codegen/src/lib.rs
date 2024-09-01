@@ -409,6 +409,7 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn emit_return(&mut self) {
+        // FIXME use abi instead
         let types = translate_type_for_calls(
             self.body.locals[return_slot()].ty.clone(),
             self.module.isa(),
@@ -427,16 +428,13 @@ impl<'a> FunctionTranslator<'a> {
             StatementKind::Assign(place, rvalue) => {
                 self.translate_stmt_assign(place, rvalue);
             }
-            StatementKind::StorageLive(_local) => {
-                // FIXME anything to do here?
+            StatementKind::Deinit(_place) => {
+                panic!("unsupported deinit stmt")
             }
-            StatementKind::StorageDead(_local) => {
-                // FIXME anything to do here?
-            }
-            StatementKind::FakeRead(_place) => {
-                // FIXME anything to do here?
-            }
-            _ => panic!("unsupported stmt kind: {:?}", stmt.kind),
+            StatementKind::StorageLive(_)
+            | StatementKind::StorageDead(_)
+            | StatementKind::FakeRead(_)
+            | StatementKind::Nop => {}
         }
     }
 
@@ -500,23 +498,72 @@ impl<'a> FunctionTranslator<'a> {
 
     fn translate_place(&mut self, place: &Place) -> PlaceKind {
         let projection = place.projection.lookup(&self.body.projection_store);
-        match projection {
-            [] => {
-                let var = self.get_variable(place.local);
-                match var {
-                    LocalKind::Variable(var) => PlaceKind::Variable(var),
-                    LocalKind::Stack(stack) => PlaceKind::Stack(stack, 0),
+        let local = place.local;
+        self.translate_local_with_projection(local, projection).0
+    }
+
+    fn translate_local_with_projection(
+        &mut self,
+        local: LocalId,
+        projection: &[ProjectionElem<LocalId, Ty>],
+    ) -> (PlaceKind, Ty) {
+        let mut ty = self.body.locals[local].ty.clone();
+        let var = self.get_variable(local);
+        let mut kind = match var {
+            LocalKind::Variable(var) => PlaceKind::Variable(var),
+            LocalKind::Stack(ss) => PlaceKind::Stack(ss, 0),
+        };
+        for elem in projection {
+            match elem {
+                ProjectionElem::Deref => {
+                    ty = ty.as_reference_or_ptr().expect("non-ptr deref target").0.clone();
+                    let addr =
+                        self.translate_place_kind_access(kind, self.module.isa().pointer_type());
+                    kind = PlaceKind::Mem(addr, 0);
                 }
+                ProjectionElem::Index(idx) => {
+                    let addr = self.translate_place_kind_addr(kind);
+                    ty = match ty.kind(Interner) {
+                        TyKind::Array(elem_ty, _size) => elem_ty.clone(),
+                        _ => panic!("unsupported ty for indexing: {:?}", ty),
+                    };
+                    // FIXME bounds check?
+                    let layout = self.ty_layout(ty.clone());
+                    let ptr_typ = self.module.isa().pointer_type();
+                    let elem_size =
+                        self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
+                    let idx = self.translate_local_access(*idx);
+                    let idx_offset = self.builder.ins().imul(idx, elem_size);
+                    let addr = self.builder.ins().iadd(addr, idx_offset);
+                    kind = PlaceKind::Mem(addr, 0);
+                }
+                _ => panic!("unsupported projection elem in place: {:?}", elem),
             }
-            [tail @ .., last] => {
-                let addr = self.translate_local_access(place.local);
-                if tail.len() > 0 {
-                    panic!("unsupported more than one projection elem in assign");
-                }
-                match last {
-                    ProjectionElem::Deref => PlaceKind::Mem(addr, 0),
-                    _ => panic!("unsupported projection elem in assign: {:?}", last),
-                }
+        }
+        (kind, ty)
+    }
+
+    fn translate_place_kind_addr(&mut self, kind: PlaceKind) -> Value {
+        match kind {
+            PlaceKind::Variable(_) => panic!("trying to take addr of variable"),
+            PlaceKind::Stack(ss, off) => {
+                let slot_addr =
+                    self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, off);
+                slot_addr
+            }
+            PlaceKind::Mem(addr, off) => {
+                let off = self.builder.ins().iconst(self.module.isa().pointer_type(), off as i64);
+                self.builder.ins().iadd(addr, off)
+            }
+        }
+    }
+
+    fn translate_place_kind_access(&mut self, kind: PlaceKind, typ: Type) -> Value {
+        match kind {
+            PlaceKind::Variable(var) => self.builder.use_var(var),
+            PlaceKind::Stack(ss, off) => self.builder.ins().stack_load(typ, ss, off),
+            PlaceKind::Mem(addr, off) => {
+                self.builder.ins().load(typ, MemFlags::trusted(), addr, off)
             }
         }
     }
@@ -692,100 +739,51 @@ impl<'a> FunctionTranslator<'a> {
         local: LocalId,
         projection: &[ProjectionElem<LocalId, Ty>],
     ) -> ValueKind {
-        let mut ty = self.body.locals[local].ty.clone();
+        let (place_kind, ty) = self.translate_local_with_projection(local, projection);
         let layout = self.ty_layout(ty.clone());
         let abi = layout.abi;
-        let variable = self.get_variable(local);
-        let mut val = match variable {
-            LocalKind::Variable(var) => {
+        return match place_kind {
+            PlaceKind::Variable(var) => {
                 let var_val = self.builder.use_var(var);
                 match abi {
                     Abi::Scalar(scalar) => ValueKind::Primitive(var_val, scalar_signedness(scalar)),
                     _ => panic!("unsupported for var load: {:?}", abi),
                 }
             }
-            LocalKind::Stack(slot) => match abi {
+            PlaceKind::Stack(slot, off) => match abi {
                 Abi::Scalar(scalar) => {
                     let loaded_val = self.builder.ins().stack_load(
                         translate_type(ty.clone(), self.module.isa(), "stack copy"),
                         slot,
-                        0,
+                        off,
                     );
                     ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
                 }
                 Abi::Aggregate { sized: true } => ValueKind::Aggregate {
                     slot: MemSlot::Stack(slot),
-                    offset: 0,
+                    offset: off,
                     size: layout.size.bytes_usize() as i32,
                 },
-                _ => panic!("unsupported abi for var load from stack: {:?}", abi),
+                _ => panic!("unsupported abi for var copy from stack: {:?}", abi),
+            },
+            PlaceKind::Mem(addr, off) => match abi {
+                Abi::Scalar(scalar) => {
+                    let loaded_val = self.builder.ins().load(
+                        translate_type(ty.clone(), self.module.isa(), "stack copy"),
+                        MemFlags::trusted(),
+                        addr,
+                        off,
+                    );
+                    ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
+                }
+                Abi::Aggregate { sized: true } => ValueKind::Aggregate {
+                    slot: MemSlot::MemAddr(addr),
+                    offset: off,
+                    size: layout.size.bytes_usize() as i32,
+                },
+                _ => panic!("unsupported abi for var copy from mem: {:?}", abi),
             },
         };
-        for proj in projection {
-            match proj {
-                ProjectionElem::Deref => {
-                    ty = ty.as_reference_or_ptr().expect("non-ptr type derefed").0.clone();
-                    let abi = self.ty_layout(ty.clone()).abi;
-                    let mem_flags = MemFlags::trusted();
-                    val = match abi {
-                        Abi::Scalar(scalar) => {
-                            let loaded_val = self.builder.ins().load(
-                                translate_type(ty.clone(), self.module.isa(), "ptr type load"),
-                                mem_flags,
-                                val.assert_primitive().0,
-                                0,
-                            );
-                            ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
-                        }
-                        _ => panic!("unsupported abi for deref target: {:?}", abi),
-                    };
-                }
-                ProjectionElem::Index(idx) => {
-                    let idx = self.translate_local_access(*idx);
-                    ty = match ty.kind(Interner) {
-                        TyKind::Array(elem_ty, _size) => elem_ty.clone(),
-                        _ => panic!("unsupported ty for indexing: {:?}", ty),
-                    };
-                    // FIXME bounds check?
-                    let layout = self.ty_layout(ty.clone());
-                    let ptr_typ = self.module.isa().pointer_type();
-                    let abi = layout.abi;
-                    let addr = match val {
-                        ValueKind::Primitive(_, _) => panic!("indexing into primitive"),
-                        ValueKind::Aggregate { slot, offset, size: _ } => {
-                            let addr = self.translate_mem_slot_addr(slot, offset);
-                            let elem_size = self
-                                .builder
-                                .ins()
-                                .iconst(ptr_typ, layout.size.bytes_usize() as i64);
-                            let idx_offset = self.builder.ins().imul(idx, elem_size);
-                            self.builder.ins().iadd(addr, idx_offset)
-                        }
-                    };
-                    let mem_flags = MemFlags::trusted();
-                    // FIXME unify this with deref code
-                    val = match abi {
-                        Abi::Scalar(scalar) => {
-                            let loaded_val = self.builder.ins().load(
-                                translate_type(ty.clone(), self.module.isa(), "index load"),
-                                mem_flags,
-                                addr,
-                                0,
-                            );
-                            ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
-                        }
-                        Abi::Aggregate { sized: true } => ValueKind::Aggregate {
-                            slot: MemSlot::MemAddr(addr),
-                            offset: 0,
-                            size: layout.size.bytes_usize() as i32,
-                        },
-                        _ => panic!("unsupported abi for index target: {:?}", abi),
-                    }
-                }
-                _ => panic!("unsupported projection elem in copy: {:?}", proj),
-            }
-        }
-        val
     }
 
     fn translate_local_access(&mut self, local: LocalId) -> Value {
