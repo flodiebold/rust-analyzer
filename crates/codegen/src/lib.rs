@@ -216,12 +216,14 @@ struct FunctionTranslator<'a> {
 #[derive(Clone, Copy, Debug)]
 enum LocalKind {
     Variable(Variable),
+    VariablePair(Variable, Variable),
     Stack(StackSlot),
 }
 
 #[derive(Clone, Copy, Debug)]
 enum PlaceKind {
     Variable(Variable),
+    VariablePair(Variable, Variable),
     Stack(StackSlot, i32),
     Mem(Value, i32),
 }
@@ -229,6 +231,7 @@ enum PlaceKind {
 #[derive(Clone, Copy, Debug)]
 enum ValueKind {
     Primitive(Value, bool),
+    ScalarPair(Value, Value),
     Aggregate { slot: MemSlot, offset: i32, size: i32 },
 }
 
@@ -414,8 +417,9 @@ impl<'a> FunctionTranslator<'a> {
         let layout = self.ty_layout(return_ty);
         let returns = match layout.abi {
             Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => Vec::new(),
-            _ => match self.translate_copy_local_with_projection(return_slot(), &[]) {
+            _ => match self.translate_copy_local_with_projection(return_slot(), &[]).0 {
                 ValueKind::Primitive(val, _) => [val].to_vec(),
+                ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
                 ValueKind::Aggregate { .. } => panic!("unsupported aggregate return"),
             },
         };
@@ -454,12 +458,15 @@ impl<'a> FunctionTranslator<'a> {
                         ValueKind::Primitive(addr, false)
                     }
                     [rest @ .., ProjectionElem::Deref] => {
-                        self.translate_copy_local_with_projection(place.local, rest)
+                        self.translate_copy_local_with_projection(place.local, rest).0
                     }
                     _ => {
                         let place_kind = self.translate_place(place);
                         let addr = match place_kind {
                             PlaceKind::Variable(_) => panic!("unsupported ref to variable"),
+                            PlaceKind::VariablePair(_, _) => {
+                                panic!("unsupported ref to variable pair")
+                            }
                             PlaceKind::Stack(ss, off) => {
                                 let addr = self.builder.ins().stack_addr(typ, ss, off);
                                 addr
@@ -472,27 +479,41 @@ impl<'a> FunctionTranslator<'a> {
                     }
                 }
             }
-            Rvalue::Cast(kind, operand, _ty) => {
+            Rvalue::Cast(kind, operand, to_ty) => {
                 use hir_ty::PointerCast::*;
-                let value = self.translate_operand(operand);
+                let (value, from_ty) = self.translate_operand_with_ty(operand);
                 match kind {
                     CastKind::Pointer(UnsafeFnPointer | MutToConstPointer | ArrayToPointer) => {
                         // nothing to do here
                         value
                     }
-                    _ => panic!("unsupported cast: {:?}", kind),
+                    CastKind::Pointer(Unsize) => {
+                        let value = value.assert_primitive().0;
+                        let from_pointee =
+                            from_ty.as_reference_or_ptr().expect("pointer cast without pointer").0;
+                        match from_pointee.kind(Interner) {
+                            TyKind::Array(_, size) => {
+                                let to_layout = self.ty_layout(to_ty.clone());
+                                assert!(matches!(to_layout.abi, Abi::ScalarPair(_, _)));
+                                let size_val = self.translate_const(size).0.assert_primitive().0;
+                                ValueKind::ScalarPair(value, size_val)
+                            }
+                            _ => panic!("unsupported unsize from {:?} to {:?}", from_ty, to_ty),
+                        }
+                    }
+                    _ => panic!("unsupported cast: {:?} {:?} {:?}", kind, from_ty, to_ty),
                 }
             }
             Rvalue::Aggregate(kind, operands) => {
                 use hir_ty::mir::AggregateKind::*;
                 match kind {
                     Array(elem_ty) => {
-                        let typ = translate_type(elem_ty.clone(), self.module.isa(), "array elem");
+                        let layout = self.ty_layout(elem_ty.clone());
                         for (i, op) in operands.iter().enumerate() {
                             let val = self.translate_operand(op);
                             self.translate_place_store_with_offset(
                                 place,
-                                i as i32 * typ.bytes() as i32,
+                                i as i32 * layout.size.bytes_usize() as i32,
                                 val,
                             );
                         }
@@ -521,6 +542,7 @@ impl<'a> FunctionTranslator<'a> {
         let var = self.get_variable(local);
         let mut kind = match var {
             LocalKind::Variable(var) => PlaceKind::Variable(var),
+            LocalKind::VariablePair(var1, var2) => PlaceKind::VariablePair(var1, var2),
             LocalKind::Stack(ss) => PlaceKind::Stack(ss, 0),
         };
         for elem in projection {
@@ -528,13 +550,14 @@ impl<'a> FunctionTranslator<'a> {
                 ProjectionElem::Deref => {
                     ty = ty.as_reference_or_ptr().expect("non-ptr deref target").0.clone();
                     let addr =
-                        self.translate_place_kind_access(kind, self.module.isa().pointer_type());
+                        self.translate_load_pointer_value(kind, self.module.isa().pointer_type());
                     kind = PlaceKind::Mem(addr, 0);
                 }
                 ProjectionElem::Index(idx) => {
                     let addr = self.translate_place_kind_addr(kind);
                     ty = match ty.kind(Interner) {
                         TyKind::Array(elem_ty, _size) => elem_ty.clone(),
+                        TyKind::Slice(elem_ty) => elem_ty.clone(),
                         _ => panic!("unsupported ty for indexing: {:?}", ty),
                     };
                     // FIXME bounds check?
@@ -556,6 +579,7 @@ impl<'a> FunctionTranslator<'a> {
     fn translate_place_kind_addr(&mut self, kind: PlaceKind) -> Value {
         match kind {
             PlaceKind::Variable(_) => panic!("trying to take addr of variable"),
+            PlaceKind::VariablePair(_, _) => panic!("trying to take addr of variable pair"),
             PlaceKind::Stack(ss, off) => {
                 self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, off)
             }
@@ -563,9 +587,10 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn translate_place_kind_access(&mut self, kind: PlaceKind, typ: Type) -> Value {
+    fn translate_load_pointer_value(&mut self, kind: PlaceKind, typ: Type) -> Value {
         match kind {
             PlaceKind::Variable(var) => self.builder.use_var(var),
+            PlaceKind::VariablePair(var1, _) => self.builder.use_var(var1),
             PlaceKind::Stack(ss, off) => self.builder.ins().stack_load(typ, ss, off),
             PlaceKind::Mem(addr, off) => {
                 self.builder.ins().load(typ, MemFlags::trusted(), addr, off)
@@ -581,9 +606,19 @@ impl<'a> FunctionTranslator<'a> {
                 }
                 _ => panic!("unsupported value kind for variable store: {:?}", value),
             },
+            PlaceKind::VariablePair(var1, var2) => match value {
+                ValueKind::ScalarPair(val1, val2) => {
+                    self.builder.def_var(var1, val1);
+                    self.builder.def_var(var2, val2);
+                }
+                _ => panic!("unsupported value kind for variable pair store: {:?}", value),
+            },
             PlaceKind::Stack(dest, dest_offset) => match value {
                 ValueKind::Primitive(val, _) => {
                     self.builder.ins().stack_store(val, dest, dest_offset);
+                }
+                ValueKind::ScalarPair(_val1, _val2) => {
+                    panic!("unsupported stack store of scalar pair")
                 }
                 ValueKind::Aggregate { slot, offset, size } => {
                     let dest_slot = MemSlot::Stack(dest);
@@ -593,6 +628,9 @@ impl<'a> FunctionTranslator<'a> {
             PlaceKind::Mem(dest, dest_offset) => match value {
                 ValueKind::Primitive(val, _) => {
                     self.builder.ins().store(MemFlags::trusted(), val, dest, dest_offset);
+                }
+                ValueKind::ScalarPair(_val1, _val2) => {
+                    panic!("unsupported mem store of scalar pair")
                 }
                 ValueKind::Aggregate { slot, offset: src_offset, size } => {
                     let dest = MemSlot::MemAddr(dest);
@@ -605,9 +643,15 @@ impl<'a> FunctionTranslator<'a> {
     fn translate_place_store_with_offset(&mut self, place: &Place, offset: i32, value: ValueKind) {
         match self.translate_place(place) {
             PlaceKind::Variable(_var) => panic!("unsupported store with offset in variable"),
+            PlaceKind::VariablePair(_, _) => {
+                panic!("unsupported store with offset in variable pair")
+            }
             PlaceKind::Stack(dest, dest_offset) => match value {
                 ValueKind::Primitive(value, _) => {
                     self.builder.ins().stack_store(value, dest, offset + dest_offset);
+                }
+                ValueKind::ScalarPair(_val1, _val2) => {
+                    panic!("unsupported stack store of scalar pair")
                 }
                 ValueKind::Aggregate { slot, offset: src_offset, size } => {
                     let dest = MemSlot::Stack(dest);
@@ -622,6 +666,9 @@ impl<'a> FunctionTranslator<'a> {
                         dest,
                         offset + dest_offset,
                     );
+                }
+                ValueKind::ScalarPair(_val1, _val2) => {
+                    panic!("unsupported mem store of scalar pair")
                 }
                 ValueKind::Aggregate { slot, offset: src_offset, size } => {
                     let dest = MemSlot::MemAddr(dest);
@@ -654,10 +701,18 @@ impl<'a> FunctionTranslator<'a> {
                 .layout_of_ty(typ.clone(), self.env.clone())
                 .expect("failed to lay out type");
             if let Abi::Scalar(scalar) = layout.abi {
-                let var = Variable::new(local.into_raw().into_u32() as usize);
+                let var = Variable::new(local.into_raw().into_u32() as usize * 2);
                 let typ = translate_scalar_type(scalar, self.module.isa());
                 self.builder.declare_var(var, typ);
                 LocalKind::Variable(var)
+            } else if let Abi::ScalarPair(scalar1, scalar2) = layout.abi {
+                let typ1 = translate_scalar_type(scalar1, self.module.isa());
+                let typ2 = translate_scalar_type(scalar2, self.module.isa());
+                let var1 = Variable::new(local.into_raw().into_u32() as usize * 2);
+                let var2 = Variable::new(local.into_raw().into_u32() as usize * 2 + 1);
+                self.builder.declare_var(var1, typ1);
+                self.builder.declare_var(var2, typ2);
+                LocalKind::VariablePair(var1, var2)
             } else {
                 if !layout.is_sized() {
                     panic!("unsupported unsized type in local");
@@ -693,11 +748,18 @@ impl<'a> FunctionTranslator<'a> {
                 self.variables[local] = LocalKind::Stack(slot);
                 slot
             }
+            LocalKind::VariablePair(_var1, _var2) => {
+                panic!("unsupported stack spill of variable pair")
+            }
             LocalKind::Stack(slot) => slot,
         }
     }
 
     fn translate_operand(&mut self, operand: &Operand) -> ValueKind {
+        self.translate_operand_with_ty(operand).0
+    }
+
+    fn translate_operand_with_ty(&mut self, operand: &Operand) -> (ValueKind, Ty) {
         match operand {
             Operand::Constant(konst) => self.translate_const(konst),
             Operand::Copy(place) | Operand::Move(place) => self.translate_place_copy(place),
@@ -705,14 +767,14 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn translate_const(&mut self, konst: &chalk_ir::Const<Interner>) -> ValueKind {
+    fn translate_const(&mut self, konst: &chalk_ir::Const<Interner>) -> (ValueKind, Ty) {
         let ty = konst.data(Interner).ty.clone();
         let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
             panic!("evaluating non concrete constant");
         };
-        match &c.interned {
+        let val = match &c.interned {
             hir_ty::ConstScalar::Bytes(bytes, _mm) => {
-                let layout = self.ty_layout(ty);
+                let layout = self.ty_layout(ty.clone());
                 match layout.abi {
                     Abi::Uninhabited => unreachable!(),
                     Abi::Scalar(scalar) => {
@@ -730,10 +792,11 @@ impl<'a> FunctionTranslator<'a> {
             }
             hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
             hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
-        }
+        };
+        (val, ty)
     }
 
-    fn translate_place_copy(&mut self, place: &Place) -> ValueKind {
+    fn translate_place_copy(&mut self, place: &Place) -> (ValueKind, Ty) {
         let projection = place.projection.lookup(&self.body.projection_store);
         let local = place.local;
         self.translate_copy_local_with_projection(local, projection)
@@ -743,11 +806,11 @@ impl<'a> FunctionTranslator<'a> {
         &mut self,
         local: LocalId,
         projection: &[ProjectionElem<LocalId, Ty>],
-    ) -> ValueKind {
+    ) -> (ValueKind, Ty) {
         let (place_kind, ty) = self.translate_local_with_projection(local, projection);
         let layout = self.ty_layout(ty.clone());
         let abi = layout.abi;
-        return match place_kind {
+        let val = match place_kind {
             PlaceKind::Variable(var) => {
                 let var_val = self.builder.use_var(var);
                 match abi {
@@ -755,10 +818,20 @@ impl<'a> FunctionTranslator<'a> {
                     _ => panic!("unsupported for var load: {:?}", abi),
                 }
             }
+            PlaceKind::VariablePair(var1, var2) => {
+                let var1_val = self.builder.use_var(var1);
+                let var2_val = self.builder.use_var(var2);
+                match abi {
+                    Abi::ScalarPair(_scalar1, _scalar2) => {
+                        ValueKind::ScalarPair(var1_val, var2_val)
+                    }
+                    _ => panic!("unsupported for var pair load: {:?}", abi),
+                }
+            }
             PlaceKind::Stack(slot, off) => match abi {
                 Abi::Scalar(scalar) => {
                     let loaded_val = self.builder.ins().stack_load(
-                        translate_type(ty.clone(), self.module.isa(), "stack copy"),
+                        translate_scalar_type(scalar, self.module.isa()),
                         slot,
                         off,
                     );
@@ -774,7 +847,7 @@ impl<'a> FunctionTranslator<'a> {
             PlaceKind::Mem(addr, off) => match abi {
                 Abi::Scalar(scalar) => {
                     let loaded_val = self.builder.ins().load(
-                        translate_type(ty.clone(), self.module.isa(), "stack copy"),
+                        translate_scalar_type(scalar, self.module.isa()),
                         MemFlags::trusted(),
                         addr,
                         off,
@@ -789,12 +862,14 @@ impl<'a> FunctionTranslator<'a> {
                 _ => panic!("unsupported abi for var copy from mem: {:?}", abi),
             },
         };
+        (val, ty)
     }
 
     fn translate_local_access(&mut self, local: LocalId) -> Value {
         let variable = self.get_variable(local);
         match variable {
             LocalKind::Variable(var) => self.builder.use_var(var),
+            LocalKind::VariablePair(_, _) => panic!("unsupported variable pair access"),
             LocalKind::Stack(_) => panic!("unimplemented stack slot access"),
         }
     }
@@ -803,6 +878,7 @@ impl<'a> FunctionTranslator<'a> {
         let variable = self.get_variable(local);
         match variable {
             LocalKind::Variable(var) => self.builder.def_var(var, value),
+            LocalKind::VariablePair(_, _) => panic!("unsupported variable pair store"),
             LocalKind::Stack(_) => panic!("unimplemented stack slot store"),
         }
     }
@@ -923,45 +999,6 @@ fn translate_signature(
         .map(AbiParam::new),
     );
     signature
-}
-
-fn translate_type(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> Type {
-    // FIXME remove all uses of this function
-    use chalk_ir::{FloatTy, IntTy, TyKind, UintTy};
-    use hir_ty::Scalar;
-    let single_ty = match ty.kind(Interner) {
-        TyKind::Scalar(scalar_ty) => match scalar_ty {
-            Scalar::Bool => types::I8,
-            Scalar::Char => types::I32,
-            Scalar::Int(int_ty) => match int_ty {
-                IntTy::Isize => types::I64, // FIXME
-                IntTy::I8 => types::I8,
-                IntTy::I16 => types::I16,
-                IntTy::I32 => types::I32,
-                IntTy::I64 => types::I64,
-                IntTy::I128 => types::I128,
-            },
-            Scalar::Uint(uint_ty) => match uint_ty {
-                UintTy::Usize => types::I64, // FIXME
-                UintTy::U8 => types::I8,
-                UintTy::U16 => types::I16,
-                UintTy::U32 => types::I32,
-                UintTy::U64 => types::I64,
-                UintTy::U128 => types::I128,
-            },
-            Scalar::Float(float_ty) => match float_ty {
-                FloatTy::F16 => types::F16,
-                FloatTy::F32 => types::F32,
-                FloatTy::F64 => types::F64,
-                FloatTy::F128 => types::F128,
-            },
-        },
-        // FIXME fat pointers
-        TyKind::Ref(_, _, _) => isa.pointer_type(),
-        TyKind::Raw(_, _) => isa.pointer_type(),
-        _ => panic!("unsupported ty for {}: {:?}", ctx, ty),
-    };
-    single_ty
 }
 
 fn translate_scalar_type(scalar: Scalar, isa: &dyn TargetIsa) -> Type {
