@@ -100,6 +100,10 @@ pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
         env: Arc<TraitEnvironment>,
     ) -> Result<Arc<Layout>, LayoutError>;
 
+    // FIXME: it seems a bit weird that this takes a trait env. The crate we're
+    // in could have an effect on the layout, since we could have completely
+    // separate crate graphs including separate stds, but otherwise the same
+    // type *needs* to always have the same layout??
     #[salsa::invoke(crate::layout::layout_of_ty_query)]
     #[salsa::cycle(crate::layout::layout_of_ty_recover)]
     fn layout_of_ty(&self, ty: Ty, env: Arc<TraitEnvironment>) -> Result<Arc<Layout>, LayoutError>;

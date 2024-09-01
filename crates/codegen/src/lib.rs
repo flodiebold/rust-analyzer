@@ -22,14 +22,18 @@ use cranelift::{
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, FuncId, Module};
-use hir_def::FunctionId;
+use hir_def::{
+    layout::{Abi, Scalar},
+    FunctionId,
+};
 use hir_ty::{
     db::HirDatabase,
+    layout::Layout,
     mir::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind,
     },
-    Interner, Substitution, Ty, TyExt, TyKind,
+    Interner, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
@@ -95,7 +99,7 @@ impl Default for Jit {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
         builder.hotswap(true);
 
-        let mut module = JITModule::new(builder);
+        let module = JITModule::new(builder);
         // let mut signature = Signature::new(module.isa().default_call_conv());
         // signature.params.push(AbiParam::new(module.isa().pointer_type()));
         // signature.params.push(AbiParam::new(types::I32));
@@ -141,12 +145,9 @@ impl Jit {
 
         let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
+        let env = db.trait_environment(func_id.into());
         let body = db
-            .monomorphized_mir_body(
-                func_id.into(),
-                Substitution::empty(Interner),
-                db.trait_environment(func_id.into()),
-            )
+            .monomorphized_mir_body(func_id.into(), Substitution::empty(Interner), env.clone())
             .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
 
         let mut translator = FunctionTranslator {
@@ -157,6 +158,7 @@ impl Jit {
             builder,
             module: &mut self.module,
             shims: &mut self.shims,
+            env,
             engine: jit_engine,
         };
 
@@ -206,13 +208,33 @@ struct FunctionTranslator<'a> {
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
     shims: &'a mut FxHashMap<FunctionId, FuncId>,
+    env: Arc<TraitEnvironment>,
     engine: &'a JitEngine<'a>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum LocalKind {
     Variable(Variable),
     Stack(StackSlot),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PlaceKind {
+    Variable(Variable),
+    Stack(StackSlot, i32),
+    Mem(Value, i32),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ValueKind {
+    Primitive(Value, bool),
+    Aggregate { slot: MemSlot, offset: i32, size: i32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MemSlot {
+    Stack(StackSlot),
+    MemAddr(Value),
 }
 
 impl<'a> FunctionTranslator<'a> {
@@ -315,7 +337,7 @@ impl<'a> FunctionTranslator<'a> {
                 self.builder.ins().jump(self.blocks[*target], &[]);
             }
             TerminatorKind::SwitchInt { discr, targets } => {
-                let discr = self.translate_operand(discr);
+                let discr = self.translate_operand(discr).assert_primitive().0;
                 let mut switch = Switch::new();
                 for (val, target) in targets.iter() {
                     switch.set_entry(val, self.blocks[target]);
@@ -330,7 +352,14 @@ impl<'a> FunctionTranslator<'a> {
                     panic!("unsupported unwind");
                 }
 
-                let args: Vec<_> = args.iter().map(|a| self.translate_operand(a)).collect();
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|a| self.translate_operand(a))
+                    .map(|v| match v {
+                        ValueKind::Primitive(val, _) => val,
+                        _ => panic!("unsupported value in function call: {:?}", v),
+                    })
+                    .collect();
                 let static_func_id = match func {
                     Operand::Constant(konst) => match konst.data(Interner).ty.kind(Interner) {
                         TyKind::FnDef(func_id, subst) => {
@@ -358,7 +387,8 @@ impl<'a> FunctionTranslator<'a> {
                     let call = self.builder.ins().call(func_ref, &args);
                     match self.builder.inst_results(call).len() {
                         1 => {
-                            let result = self.builder.inst_results(call)[0];
+                            let result =
+                                ValueKind::Primitive(self.builder.inst_results(call)[0], false);
                             self.translate_place_store(destination, result);
                         }
                         0 => {}
@@ -379,8 +409,11 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn emit_return(&mut self) {
-        let types =
-            translate_type_for_calls(self.body.locals[return_slot()].ty.clone(), self.module.isa());
+        let types = translate_type_for_calls(
+            self.body.locals[return_slot()].ty.clone(),
+            self.module.isa(),
+            "return",
+        );
         let returns = match types.len() {
             0 => Vec::new(),
             1 => [self.translate_local_access(return_slot())].to_vec(),
@@ -408,61 +441,6 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_stmt_assign(&mut self, place: &Place, rvalue: &Rvalue) {
-        let value = self.translate_rvalue(rvalue);
-        self.translate_place_store(place, value)
-    }
-
-    fn translate_place_store(&mut self, place: &Place, value: Value) {
-        let projection = place.projection.lookup(&self.body.projection_store);
-        match projection {
-            [] => self.translate_local_store(place.local, value),
-            [tail @ .., last] => {
-                let addr = self.translate_local_access(place.local);
-                if tail.len() > 0 {
-                    panic!("unsupported more than one projection elem in assign");
-                }
-                match last {
-                    ProjectionElem::Deref => {
-                        let mem_flags = MemFlags::trusted();
-                        self.builder.ins().store(mem_flags, value, addr, 0);
-                    }
-                    _ => panic!("unsupported projection elem in assign: {:?}", last),
-                }
-            }
-        }
-    }
-
-    fn get_variable(&mut self, local: LocalId) -> LocalKind {
-        let typ = self.body.locals[local].ty.clone();
-        let variable = *self.variables.entry(local).or_insert_with(|| {
-            let var = Variable::new(local.into_raw().into_u32() as usize);
-            let typ = translate_type(typ, self.module.isa());
-            self.builder.declare_var(var, typ);
-            LocalKind::Variable(var)
-        });
-        variable
-    }
-
-    fn spill_to_stack(&mut self, local: LocalId) -> StackSlot {
-        let current = self.get_variable(local);
-        match current {
-            LocalKind::Variable(var) => {
-                let typ = self.body.locals[local].ty.clone();
-                let slot = self.builder.create_sized_stack_slot(StackSlotData {
-                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
-                    size: translate_type(typ, self.module.isa()).bytes(),
-                    align_shift: 3, // FIXME alignment!
-                });
-                let val = self.builder.use_var(var);
-                self.builder.ins().stack_store(val, slot, 0);
-                self.variables[local] = LocalKind::Stack(slot);
-                slot
-            }
-            LocalKind::Stack(slot) => slot,
-        }
-    }
-
-    fn translate_rvalue(&mut self, rvalue: &Rvalue) -> Value {
         let value = match rvalue {
             Rvalue::Use(operand) => self.translate_operand(operand),
             Rvalue::CheckedBinaryOp(binop, left, right) => {
@@ -476,7 +454,7 @@ impl<'a> FunctionTranslator<'a> {
                         let stack_slot = self.spill_to_stack(place.local);
                         let typ = self.module.isa().pointer_type();
                         let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);
-                        addr
+                        ValueKind::Primitive(addr, false)
                     }
                     [rest @ .., ProjectionElem::Deref] => {
                         self.translate_copy_local_with_projection(place.local, rest)
@@ -497,37 +475,213 @@ impl<'a> FunctionTranslator<'a> {
                     _ => panic!("unsupported cast: {:?}", kind),
                 }
             }
+            Rvalue::Aggregate(kind, operands) => {
+                use hir_ty::mir::AggregateKind::*;
+                match kind {
+                    Array(elem_ty) => {
+                        let typ = translate_type(elem_ty.clone(), self.module.isa(), "array elem");
+                        for (i, op) in operands.iter().enumerate() {
+                            let val = self.translate_operand(op);
+                            self.translate_place_store_with_offset(
+                                place,
+                                i as i32 * typ.bytes() as i32,
+                                val,
+                            );
+                        }
+                        return;
+                    }
+                    _ => panic!("unsupported aggregate: {:?}", kind),
+                }
+            }
             _ => panic!("unsupported rvalue: {:?}", rvalue),
         };
-        value
+        self.translate_place_store(place, value)
     }
 
-    fn translate_operand(&mut self, operand: &Operand) -> Value {
+    fn translate_place(&mut self, place: &Place) -> PlaceKind {
+        let projection = place.projection.lookup(&self.body.projection_store);
+        match projection {
+            [] => {
+                let var = self.get_variable(place.local);
+                match var {
+                    LocalKind::Variable(var) => PlaceKind::Variable(var),
+                    LocalKind::Stack(stack) => PlaceKind::Stack(stack, 0),
+                }
+            }
+            [tail @ .., last] => {
+                let addr = self.translate_local_access(place.local);
+                if tail.len() > 0 {
+                    panic!("unsupported more than one projection elem in assign");
+                }
+                match last {
+                    ProjectionElem::Deref => PlaceKind::Mem(addr, 0),
+                    _ => panic!("unsupported projection elem in assign: {:?}", last),
+                }
+            }
+        }
+    }
+
+    fn translate_place_store(&mut self, place: &Place, value: ValueKind) {
+        match self.translate_place(place) {
+            PlaceKind::Variable(var) => match value {
+                ValueKind::Primitive(val, _) => {
+                    self.builder.def_var(var, val);
+                }
+                _ => panic!("unsupported value kind for variable store: {:?}", value),
+            },
+            PlaceKind::Stack(dest, dest_offset) => match value {
+                ValueKind::Primitive(val, _) => {
+                    self.builder.ins().stack_store(val, dest, dest_offset);
+                }
+                ValueKind::Aggregate { slot, offset, size } => {
+                    let dest_slot = MemSlot::Stack(dest);
+                    self.translate_mem_copy(dest_slot, dest_offset, slot, offset, size)
+                }
+            },
+            PlaceKind::Mem(dest, dest_offset) => match value {
+                ValueKind::Primitive(val, _) => {
+                    self.builder.ins().store(MemFlags::trusted(), val, dest, dest_offset);
+                }
+                ValueKind::Aggregate { slot, offset: src_offset, size } => {
+                    let dest = MemSlot::MemAddr(dest);
+                    self.translate_mem_copy(dest, dest_offset, slot, src_offset, size)
+                }
+            },
+        }
+    }
+
+    fn translate_place_store_with_offset(&mut self, place: &Place, offset: i32, value: ValueKind) {
+        match self.translate_place(place) {
+            PlaceKind::Variable(_var) => panic!("unsupported store with offset in variable"),
+            PlaceKind::Stack(dest, dest_offset) => match value {
+                ValueKind::Primitive(value, _) => {
+                    self.builder.ins().stack_store(value, dest, offset + dest_offset);
+                }
+                ValueKind::Aggregate { slot, offset: src_offset, size } => {
+                    let dest = MemSlot::Stack(dest);
+                    self.translate_mem_copy(dest, dest_offset + offset, slot, src_offset, size)
+                }
+            },
+            PlaceKind::Mem(dest, dest_offset) => match value {
+                ValueKind::Primitive(value, _) => {
+                    self.builder.ins().store(
+                        MemFlags::trusted(),
+                        value,
+                        dest,
+                        offset + dest_offset,
+                    );
+                }
+                ValueKind::Aggregate { slot, offset: src_offset, size } => {
+                    let dest = MemSlot::MemAddr(dest);
+                    self.translate_mem_copy(dest, dest_offset + offset, slot, src_offset, size)
+                }
+            },
+        }
+    }
+
+    fn translate_mem_slot_addr(&mut self, slot: MemSlot, offset: i32) -> Value {
+        match slot {
+            MemSlot::Stack(ss) => {
+                self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, offset)
+            }
+            MemSlot::MemAddr(addr) if offset == 0 => addr,
+            MemSlot::MemAddr(addr) => {
+                let off =
+                    self.builder.ins().iconst(self.module.isa().pointer_type(), offset as i64);
+                self.builder.ins().iadd(addr, off)
+            }
+        }
+    }
+
+    fn get_variable(&mut self, local: LocalId) -> LocalKind {
+        let typ = self.body.locals[local].ty.clone();
+        let variable = *self.variables.entry(local).or_insert_with(|| {
+            // FIXME error handling here!
+            let layout = self
+                .db
+                .layout_of_ty(typ.clone(), self.env.clone())
+                .expect("failed to lay out type");
+            if let Abi::Scalar(scalar) = layout.abi {
+                let var = Variable::new(local.into_raw().into_u32() as usize);
+                let typ = translate_scalar_type(scalar, self.module.isa());
+                self.builder.declare_var(var, typ);
+                LocalKind::Variable(var)
+            } else {
+                if !layout.is_sized() {
+                    panic!("unsupported unsized type in local");
+                }
+                let size = layout.size.bytes_usize();
+                let slot = self.builder.create_sized_stack_slot(StackSlotData {
+                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
+                    size: size as u32,
+                    align_shift: layout.align.pref.bytes().ilog2() as u8,
+                });
+                LocalKind::Stack(slot)
+            }
+        });
+        variable
+    }
+
+    fn spill_to_stack(&mut self, local: LocalId) -> StackSlot {
+        let current = self.get_variable(local);
+        match current {
+            LocalKind::Variable(var) => {
+                let typ = self.body.locals[local].ty.clone();
+                let layout = self
+                    .db
+                    .layout_of_ty(typ.clone(), self.env.clone())
+                    .expect("failed to lay out type");
+                let slot = self.builder.create_sized_stack_slot(StackSlotData {
+                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
+                    size: layout.size.bytes_usize() as u32,
+                    align_shift: layout.align.pref.bytes().ilog2() as u8,
+                });
+                let val = self.builder.use_var(var);
+                self.builder.ins().stack_store(val, slot, 0);
+                self.variables[local] = LocalKind::Stack(slot);
+                slot
+            }
+            LocalKind::Stack(slot) => slot,
+        }
+    }
+
+    fn translate_operand(&mut self, operand: &Operand) -> ValueKind {
         match operand {
             Operand::Constant(konst) => self.translate_const(konst),
-            Operand::Copy(place) => self.translate_place_copy(place),
+            Operand::Copy(place) | Operand::Move(place) => self.translate_place_copy(place),
             _ => panic!("unsupported operand: {:?}", operand),
         }
     }
 
-    fn translate_const(&mut self, konst: &chalk_ir::Const<Interner>) -> Value {
+    fn translate_const(&mut self, konst: &chalk_ir::Const<Interner>) -> ValueKind {
         let ty = konst.data(Interner).ty.clone();
         let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
             panic!("evaluating non concrete constant");
         };
         match &c.interned {
             hir_ty::ConstScalar::Bytes(bytes, _mm) => {
-                let typ = translate_type(ty, self.module.isa());
-                let mut data: [u8; 8] = [0; 8];
-                data[0..bytes.len()].copy_from_slice(&bytes);
-                self.builder.ins().iconst(typ, i64::from_le_bytes(data))
+                let layout = self.ty_layout(ty);
+                match layout.abi {
+                    Abi::Uninhabited => unreachable!(),
+                    Abi::Scalar(scalar) => {
+                        let typ = translate_scalar_type(scalar, self.module.isa());
+                        let signed = scalar_signedness(scalar);
+                        let mut data: [u8; 8] = [0; 8];
+                        data[0..bytes.len()].copy_from_slice(&bytes);
+                        ValueKind::Primitive(
+                            self.builder.ins().iconst(typ, i64::from_le_bytes(data)),
+                            signed,
+                        )
+                    }
+                    _ => panic!("unsupported abi for const: {:?}", layout.abi),
+                }
             }
             hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
             hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
         }
     }
 
-    fn translate_place_copy(&mut self, place: &Place) -> Value {
+    fn translate_place_copy(&mut self, place: &Place) -> ValueKind {
         let projection = place.projection.lookup(&self.body.projection_store);
         let local = place.local;
         self.translate_copy_local_with_projection(local, projection)
@@ -537,28 +691,54 @@ impl<'a> FunctionTranslator<'a> {
         &mut self,
         local: LocalId,
         projection: &[ProjectionElem<LocalId, Ty>],
-    ) -> Value {
+    ) -> ValueKind {
         let mut ty = self.body.locals[local].ty.clone();
+        let layout = self.ty_layout(ty.clone());
+        let abi = layout.abi;
         let variable = self.get_variable(local);
         let mut val = match variable {
-            LocalKind::Variable(var) => self.builder.use_var(var),
-            LocalKind::Stack(slot) => self.builder.ins().stack_load(
-                translate_type(ty.clone(), self.module.isa()),
-                slot,
-                0,
-            ),
+            LocalKind::Variable(var) => {
+                let var_val = self.builder.use_var(var);
+                match abi {
+                    Abi::Scalar(scalar) => ValueKind::Primitive(var_val, scalar_signedness(scalar)),
+                    _ => panic!("unsupported for var load: {:?}", abi),
+                }
+            }
+            LocalKind::Stack(slot) => match abi {
+                Abi::Scalar(scalar) => {
+                    let loaded_val = self.builder.ins().stack_load(
+                        translate_type(ty.clone(), self.module.isa(), "stack copy"),
+                        slot,
+                        0,
+                    );
+                    ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
+                }
+                Abi::Aggregate { sized: true } => ValueKind::Aggregate {
+                    slot: MemSlot::Stack(slot),
+                    offset: 0,
+                    size: layout.size.bytes_usize() as i32,
+                },
+                _ => panic!("unsupported abi for var load from stack: {:?}", abi),
+            },
         };
         for proj in projection {
             match proj {
                 ProjectionElem::Deref => {
                     ty = ty.as_reference_or_ptr().expect("non-ptr type derefed").0.clone();
+                    let abi = self.ty_layout(ty.clone()).abi;
                     let mem_flags = MemFlags::trusted();
-                    val = self.builder.ins().load(
-                        translate_type(ty.clone(), self.module.isa()),
-                        mem_flags,
-                        val,
-                        0,
-                    );
+                    val = match abi {
+                        Abi::Scalar(scalar) => {
+                            let loaded_val = self.builder.ins().load(
+                                translate_type(ty.clone(), self.module.isa(), "ptr type load"),
+                                mem_flags,
+                                val.assert_primitive().0,
+                                0,
+                            );
+                            ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
+                        }
+                        _ => panic!("unsupported abi for deref target: {:?}", abi),
+                    };
                 }
                 _ => panic!("unsupported projection elem in copy: {:?}", proj),
             }
@@ -582,10 +762,19 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn translate_checked_binop(&mut self, binop: &BinOp, left: &Operand, right: &Operand) -> Value {
-        let left = self.translate_operand(left);
-        let right = self.translate_operand(right);
-        match binop {
+    fn translate_checked_binop(
+        &mut self,
+        binop: &BinOp,
+        left: &Operand,
+        right: &Operand,
+    ) -> ValueKind {
+        let (left, signed1) = self.translate_operand(left).assert_primitive();
+        let (right, signed2) = self.translate_operand(right).assert_primitive();
+        assert_eq!(signed1, signed2);
+        if !signed1 {
+            panic!("unsupported unsigned operation");
+        }
+        let result = match binop {
             // FIXME checked?
             BinOp::Add => self.builder.ins().iadd(left, right),
             BinOp::Sub => self.builder.ins().isub(left, right),
@@ -602,6 +791,44 @@ impl<'a> FunctionTranslator<'a> {
             BinOp::Gt => self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right),
             BinOp::Ge => self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right),
             _ => panic!("unsupported binop: {:?}", binop),
+        };
+        ValueKind::Primitive(result, signed1)
+    }
+
+    fn ty_layout(&self, ty: Ty) -> Arc<Layout> {
+        // FIXME error handling?
+        self.db.layout_of_ty(ty, self.env.clone()).expect("failed layout")
+    }
+
+    fn translate_mem_copy(
+        &mut self,
+        dest: MemSlot,
+        dest_offset: i32,
+        slot: MemSlot,
+        offset: i32,
+        size: i32,
+    ) {
+        let config = self.module.target_config();
+        let dest = self.translate_mem_slot_addr(dest, dest_offset);
+        let src = self.translate_mem_slot_addr(slot, offset);
+        self.builder.emit_small_memory_copy(
+            config,
+            dest,
+            src,
+            size as u64,
+            3, // FIXME align
+            3,
+            true,
+            MemFlags::trusted(),
+        )
+    }
+}
+
+impl ValueKind {
+    fn assert_primitive(&self) -> (Value, bool) {
+        match *self {
+            ValueKind::Primitive(val, signedness) => (val, signedness),
+            _ => panic!("non-primitive value"),
         }
     }
 }
@@ -612,16 +839,18 @@ fn translate_signature(sig: &hir_ty::CallableSig, isa: &dyn TargetIsa) -> Signat
         _ => panic!("unsupported ABI: {:?}", sig.abi()),
     };
     let mut signature = Signature::new(call_conv);
-    signature
-        .params
-        .extend(sig.params().iter().map(|t| translate_type(t.clone(), isa)).map(AbiParam::new));
-    signature
-        .returns
-        .extend(translate_type_for_calls(sig.ret().clone(), isa).into_iter().map(AbiParam::new));
+    signature.params.extend(
+        sig.params().iter().map(|t| translate_type(t.clone(), isa, "sig")).map(AbiParam::new),
+    );
+    signature.returns.extend(
+        translate_type_for_calls(sig.ret().clone(), isa, "sig return")
+            .into_iter()
+            .map(AbiParam::new),
+    );
     signature
 }
 
-fn translate_type_for_calls(ty: Ty, isa: &dyn TargetIsa) -> SmallVec<[Type; 1]> {
+fn translate_type_for_calls(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> SmallVec<[Type; 1]> {
     use chalk_ir::{FloatTy, IntTy, TyKind, UintTy};
     use hir_ty::Scalar;
     let single_ty = match ty.kind(Interner) {
@@ -655,17 +884,42 @@ fn translate_type_for_calls(ty: Ty, isa: &dyn TargetIsa) -> SmallVec<[Type; 1]> 
         TyKind::Ref(_, _, _) => isa.pointer_type(),
         TyKind::Raw(_, _) => isa.pointer_type(),
         TyKind::Tuple(0, _) => return SmallVec::new(),
-        _ => panic!("unsupported ty: {:?}", ty),
+        _ => panic!("unsupported ty for {}: {:?}", ctx, ty),
     };
     SmallVec::from_buf([single_ty])
 }
 
-fn translate_type(ty: Ty, isa: &dyn TargetIsa) -> Type {
-    let typ = translate_type_for_calls(ty.clone(), isa);
+fn translate_type(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> Type {
+    let typ = translate_type_for_calls(ty.clone(), isa, ctx);
     if typ.len() == 1 {
         typ[0]
     } else {
-        panic!("unsupported ty: {:?}", ty)
+        panic!("unsupported ty for {}: {:?}", ctx, ty)
+    }
+}
+
+fn translate_scalar_type(scalar: Scalar, isa: &dyn TargetIsa) -> Type {
+    use hir_def::layout::{AddressSpace, Float, Primitive};
+    let (Scalar::Initialized { value, valid_range: _ } | Scalar::Union { value }) = scalar;
+    match value {
+        Primitive::Int(int, _) => {
+            Type::int_with_byte_size(int.size().bytes_usize() as u16).unwrap()
+        }
+        Primitive::Float(Float::F16) => types::F16,
+        Primitive::Float(Float::F32) => types::F32,
+        Primitive::Float(Float::F64) => types::F64,
+        Primitive::Float(Float::F128) => types::F128,
+        Primitive::Pointer(AddressSpace::DATA) => isa.pointer_type(),
+        Primitive::Pointer(_) => panic!("unsupported address space"),
+    }
+}
+
+fn scalar_signedness(scalar: Scalar) -> bool {
+    use hir_def::layout::Primitive;
+    let (Scalar::Initialized { value, valid_range: _ } | Scalar::Union { value }) = scalar;
+    match value {
+        Primitive::Int(_, signedness) => signedness,
+        Primitive::Float(_) | Primitive::Pointer(_) => false,
     }
 }
 
