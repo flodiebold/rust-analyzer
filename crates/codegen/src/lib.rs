@@ -446,11 +446,11 @@ impl<'a> FunctionTranslator<'a> {
             }
             Rvalue::Ref(_, place) => {
                 let projection = place.projection.lookup(&self.body.projection_store);
+                let typ = self.module.isa().pointer_type();
                 match projection {
                     [] => {
                         // FIXME spilling on demand like this won't work properly, I think?
                         let stack_slot = self.spill_to_stack(place.local);
-                        let typ = self.module.isa().pointer_type();
                         let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);
                         ValueKind::Primitive(addr, false)
                     }
@@ -458,7 +458,18 @@ impl<'a> FunctionTranslator<'a> {
                         self.translate_copy_local_with_projection(place.local, rest)
                     }
                     _ => {
-                        panic!("unsupported projection in rvalue: {:?}", projection);
+                        let place_kind = self.translate_place(place);
+                        let addr = match place_kind {
+                            PlaceKind::Variable(_) => panic!("unsupported ref to variable"),
+                            PlaceKind::Stack(ss, off) => {
+                                let addr = self.builder.ins().stack_addr(typ, ss, off);
+                                addr
+                            }
+                            PlaceKind::Mem(addr, off) => {
+                                self.builder.ins().iadd_imm(addr, off as i64)
+                            }
+                        };
+                        ValueKind::Primitive(addr, false)
                     }
                 }
             }
@@ -547,14 +558,9 @@ impl<'a> FunctionTranslator<'a> {
         match kind {
             PlaceKind::Variable(_) => panic!("trying to take addr of variable"),
             PlaceKind::Stack(ss, off) => {
-                let slot_addr =
-                    self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, off);
-                slot_addr
+                self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, off)
             }
-            PlaceKind::Mem(addr, off) => {
-                let off = self.builder.ins().iconst(self.module.isa().pointer_type(), off as i64);
-                self.builder.ins().iadd(addr, off)
-            }
+            PlaceKind::Mem(addr, off) => self.builder.ins().iadd_imm(addr, off as i64),
         }
     }
 
