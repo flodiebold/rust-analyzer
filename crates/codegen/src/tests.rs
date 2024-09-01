@@ -316,7 +316,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_tuple_1() {
     check_i32(
         r#"
@@ -330,7 +329,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_tuple_2() {
     check_i32(
         r#"
@@ -338,6 +336,20 @@ fn test() -> i32 {
     let t = (2, 3);
     let (a, b) = t;
     a + b
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_tuple_3() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let t = (2u8, 2i32, 1i64);
+    let (a, b, c) = t;
+    a as i32 + b + c as i32
 }
 "#,
         5,

@@ -22,13 +22,15 @@ use cranelift::{
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, FuncId, Module};
+use either::Either;
 use hir_def::{
+    db::EnumVariantDataWithDiagnosticsQuery,
     layout::{Abi, Scalar},
     FunctionId,
 };
 use hir_ty::{
     db::HirDatabase,
-    layout::Layout,
+    layout::{Layout, RustcFieldIdx},
     mir::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind,
@@ -519,6 +521,40 @@ impl<'a> FunctionTranslator<'a> {
                         }
                         return;
                     }
+                    Tuple(tuple_ty) => {
+                        let layout = self.ty_layout(tuple_ty.clone());
+                        let fields = match &layout.fields {
+                            hir_def::layout::FieldsShape::Arbitrary {
+                                offsets,
+                                memory_index: _,
+                            } => offsets,
+                            _ => panic!("tuple with unsupported fields shape: {:?}", layout.fields),
+                        };
+                        match layout.abi {
+                            Abi::ScalarPair(_, _) => {
+                                assert_eq!(operands.len(), 2);
+                                let val1 =
+                                    self.translate_operand(&operands[0]).assert_primitive().0;
+                                let val2 =
+                                    self.translate_operand(&operands[1]).assert_primitive().0;
+                                let val = ValueKind::ScalarPair(val1, val2);
+                                self.translate_place_store(place, val);
+                            }
+                            Abi::Aggregate { sized: true } => {
+                                for (i, op) in operands.iter().enumerate() {
+                                    let val = self.translate_operand(op);
+                                    let field_offset = fields[RustcFieldIdx::new(i)];
+                                    self.translate_place_store_with_offset(
+                                        place,
+                                        field_offset.bytes_usize() as i32,
+                                        val,
+                                    );
+                                }
+                            }
+                            _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
+                        };
+                        return;
+                    }
                     _ => panic!("unsupported aggregate: {:?}", kind),
                 }
             }
@@ -569,6 +605,29 @@ impl<'a> FunctionTranslator<'a> {
                     let idx_offset = self.builder.ins().imul(idx, elem_size);
                     let addr = self.builder.ins().iadd(addr, idx_offset);
                     kind = PlaceKind::Mem(addr, 0);
+                }
+                ProjectionElem::Field(Either::Right(tuple_idx)) => {
+                    let idx = tuple_idx.index as usize;
+                    let layout = self.ty_layout(ty.clone());
+                    ty = ty.as_tuple().unwrap().at(Interner, idx).assert_ty_ref(Interner).clone();
+                    match kind {
+                        PlaceKind::Variable(var) => {
+                            assert_eq!(0, idx);
+                            kind = PlaceKind::Variable(var);
+                        }
+                        PlaceKind::VariablePair(var1, var2) => {
+                            assert!(idx < 2);
+                            kind = PlaceKind::Variable(if idx == 0 { var1 } else { var2 });
+                        }
+                        PlaceKind::Stack(ss, off) => {
+                            let offset = layout.fields.offset(idx).bytes_usize();
+                            kind = PlaceKind::Stack(ss, off + offset as i32);
+                        }
+                        PlaceKind::Mem(addr, off) => {
+                            let offset = layout.fields.offset(idx).bytes_usize();
+                            kind = PlaceKind::Mem(addr, off + offset as i32);
+                        }
+                    }
                 }
                 _ => panic!("unsupported projection elem in place: {:?}", elem),
             }
