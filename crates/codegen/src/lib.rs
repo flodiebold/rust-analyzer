@@ -740,6 +740,48 @@ impl<'a> FunctionTranslator<'a> {
                         _ => panic!("unsupported abi for deref target: {:?}", abi),
                     };
                 }
+                ProjectionElem::Index(idx) => {
+                    let idx = self.translate_local_access(*idx);
+                    ty = match ty.kind(Interner) {
+                        TyKind::Array(elem_ty, _size) => elem_ty.clone(),
+                        _ => panic!("unsupported ty for indexing: {:?}", ty),
+                    };
+                    // FIXME bounds check?
+                    let layout = self.ty_layout(ty.clone());
+                    let ptr_typ = self.module.isa().pointer_type();
+                    let abi = layout.abi;
+                    let addr = match val {
+                        ValueKind::Primitive(_, _) => panic!("indexing into primitive"),
+                        ValueKind::Aggregate { slot, offset, size: _ } => {
+                            let addr = self.translate_mem_slot_addr(slot, offset);
+                            let elem_size = self
+                                .builder
+                                .ins()
+                                .iconst(ptr_typ, layout.size.bytes_usize() as i64);
+                            let idx_offset = self.builder.ins().imul(idx, elem_size);
+                            self.builder.ins().iadd(addr, idx_offset)
+                        }
+                    };
+                    let mem_flags = MemFlags::trusted();
+                    // FIXME unify this with deref code
+                    val = match abi {
+                        Abi::Scalar(scalar) => {
+                            let loaded_val = self.builder.ins().load(
+                                translate_type(ty.clone(), self.module.isa(), "index load"),
+                                mem_flags,
+                                addr,
+                                0,
+                            );
+                            ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
+                        }
+                        Abi::Aggregate { sized: true } => ValueKind::Aggregate {
+                            slot: MemSlot::MemAddr(addr),
+                            offset: 0,
+                            size: layout.size.bytes_usize() as i32,
+                        },
+                        _ => panic!("unsupported abi for index target: {:?}", abi),
+                    }
+                }
                 _ => panic!("unsupported projection elem in copy: {:?}", proj),
             }
         }

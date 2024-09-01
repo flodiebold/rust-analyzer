@@ -220,7 +220,7 @@ fn test() -> i32 {
 fn test_array_literal() {
     check_i32(
         r#"
-//- minicore: index
+//- minicore: index, slice
 fn test() -> i32 {
     let a = [2i32, 3];
     a[0] + a[1]
