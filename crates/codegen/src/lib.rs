@@ -141,11 +141,12 @@ impl Jit {
             panic!("unsupported generic func");
         }
 
-        self.ctx.func.signature = translate_signature(&sig, self.module.isa());
+        let env = db.trait_environment(func_id.into());
+
+        self.ctx.func.signature = translate_signature(&sig, self.module.isa(), db, &env);
 
         let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
-        let env = db.trait_environment(func_id.into());
         let body = db
             .monomorphized_mir_body(func_id.into(), Substitution::empty(Interner), env.clone())
             .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
@@ -250,7 +251,7 @@ impl<'a> FunctionTranslator<'a> {
         }
 
         let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
-        ctx.func.signature = translate_signature(&sig, self.module.isa());
+        ctx.func.signature = translate_signature(&sig, self.module.isa(), self.db, &self.env);
 
         let sig = ctx.func.signature.clone();
 
@@ -409,16 +410,14 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn emit_return(&mut self) {
-        // FIXME use abi instead
-        let types = translate_type_for_calls(
-            self.body.locals[return_slot()].ty.clone(),
-            self.module.isa(),
-            "return",
-        );
-        let returns = match types.len() {
-            0 => Vec::new(),
-            1 => [self.translate_local_access(return_slot())].to_vec(),
-            _ => panic!("unsupported multiple returns"),
+        let return_ty = self.body.locals[return_slot()].ty.clone();
+        let layout = self.ty_layout(return_ty);
+        let returns = match layout.abi {
+            Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => Vec::new(),
+            _ => match self.translate_copy_local_with_projection(return_slot(), &[]) {
+                ValueKind::Primitive(val, _) => [val].to_vec(),
+                ValueKind::Aggregate { .. } => panic!("unsupported aggregate return"),
+            },
         };
         self.builder.ins().return_(&returns);
     }
@@ -879,24 +878,55 @@ impl ValueKind {
     }
 }
 
-fn translate_signature(sig: &hir_ty::CallableSig, isa: &dyn TargetIsa) -> Signature {
+fn translate_signature(
+    sig: &hir_ty::CallableSig,
+    isa: &dyn TargetIsa,
+    db: &dyn HirDatabase,
+    env: &Arc<TraitEnvironment>,
+) -> Signature {
     let call_conv = match sig.abi() {
         hir_ty::FnAbi::Rust => CallConv::Fast,
         _ => panic!("unsupported ABI: {:?}", sig.abi()),
     };
     let mut signature = Signature::new(call_conv);
     signature.params.extend(
-        sig.params().iter().map(|t| translate_type(t.clone(), isa, "sig")).map(AbiParam::new),
-    );
-    signature.returns.extend(
-        translate_type_for_calls(sig.ret().clone(), isa, "sig return")
-            .into_iter()
+        sig.params()
+            .iter()
+            .flat_map(|ty| {
+                let layout = db.layout_of_ty(ty.clone(), env.clone()).expect("failed layout");
+                match layout.abi {
+                    Abi::Uninhabited => SmallVec::new(),
+                    Abi::Scalar(scalar) => SmallVec::from_buf([translate_scalar_type(scalar, isa)]),
+                    Abi::ScalarPair(sc1, sc2) => SmallVec::from_vec(vec![
+                        translate_scalar_type(sc1, isa),
+                        translate_scalar_type(sc2, isa),
+                    ]),
+                    Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => SmallVec::new(),
+                    _ => panic!("unsupported abi in function param: {:?}", layout.abi),
+                }
+            })
             .map(AbiParam::new),
+    );
+    let layout = db.layout_of_ty(sig.ret().clone(), env.clone()).expect("failed layout");
+    signature.returns.extend(
+        match layout.abi {
+            Abi::Uninhabited => SmallVec::new(),
+            Abi::Scalar(scalar) => SmallVec::from_buf([translate_scalar_type(scalar, isa)]),
+            Abi::ScalarPair(sc1, sc2) => SmallVec::from_vec(vec![
+                translate_scalar_type(sc1, isa),
+                translate_scalar_type(sc2, isa),
+            ]),
+            Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => SmallVec::new(),
+            _ => panic!("unsupported abi in function param: {:?}", layout.abi),
+        }
+        .into_iter()
+        .map(AbiParam::new),
     );
     signature
 }
 
-fn translate_type_for_calls(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> SmallVec<[Type; 1]> {
+fn translate_type(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> Type {
+    // FIXME remove all uses of this function
     use chalk_ir::{FloatTy, IntTy, TyKind, UintTy};
     use hir_ty::Scalar;
     let single_ty = match ty.kind(Interner) {
@@ -929,19 +959,9 @@ fn translate_type_for_calls(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> S
         // FIXME fat pointers
         TyKind::Ref(_, _, _) => isa.pointer_type(),
         TyKind::Raw(_, _) => isa.pointer_type(),
-        TyKind::Tuple(0, _) => return SmallVec::new(),
         _ => panic!("unsupported ty for {}: {:?}", ctx, ty),
     };
-    SmallVec::from_buf([single_ty])
-}
-
-fn translate_type(ty: Ty, isa: &dyn TargetIsa, ctx: &'static str) -> Type {
-    let typ = translate_type_for_calls(ty.clone(), isa, ctx);
-    if typ.len() == 1 {
-        typ[0]
-    } else {
-        panic!("unsupported ty for {}: {:?}", ctx, ty)
-    }
+    single_ty
 }
 
 fn translate_scalar_type(scalar: Scalar, isa: &dyn TargetIsa) -> Type {
