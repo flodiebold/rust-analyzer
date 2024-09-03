@@ -4,6 +4,7 @@ mod test_db;
 mod tests;
 
 use std::{
+    cmp::Ordering,
     panic::{catch_unwind, AssertUnwindSafe},
     sync::Mutex,
 };
@@ -484,7 +485,30 @@ impl<'a> FunctionTranslator<'a> {
             Rvalue::Cast(kind, operand, to_ty) => {
                 use hir_ty::PointerCast::*;
                 let (value, from_ty) = self.translate_operand_with_ty(operand);
+                let to_layout = self.ty_layout(to_ty.clone());
                 match kind {
+                    CastKind::IntToInt => {
+                        let (from_sz, from_sign) =
+                            get_int_ty(&from_ty, self.module.isa()).expect("int");
+                        let (to_sz, to_sign) = get_int_ty(&to_ty, self.module.isa()).expect("int");
+                        let to_typ = match &to_layout.abi {
+                            Abi::Scalar(scalar) => {
+                                translate_scalar_type(*scalar, self.module.isa())
+                            }
+                            _ => panic!("int with non-scalar abi"),
+                        };
+                        let value = value.assert_primitive().0;
+                        let cast_value = match (from_sz.cmp(&to_sz), from_sign, to_sign) {
+                            (Ordering::Greater, _, _) => {
+                                // FIXME is this correct for signed reductions?
+                                self.builder.ins().ireduce(to_typ, value)
+                            }
+                            (Ordering::Less, false, _) => self.builder.ins().uextend(to_typ, value),
+                            (Ordering::Less, true, _) => self.builder.ins().sextend(to_typ, value),
+                            (Ordering::Equal, _, _) => value,
+                        };
+                        ValueKind::Primitive(cast_value, to_sign)
+                    }
                     CastKind::Pointer(UnsafeFnPointer | MutToConstPointer | ArrayToPointer) => {
                         // nothing to do here
                         value
@@ -495,7 +519,6 @@ impl<'a> FunctionTranslator<'a> {
                             from_ty.as_reference_or_ptr().expect("pointer cast without pointer").0;
                         match from_pointee.kind(Interner) {
                             TyKind::Array(_, size) => {
-                                let to_layout = self.ty_layout(to_ty.clone());
                                 assert!(matches!(to_layout.abi, Abi::ScalarPair(_, _)));
                                 let size_val = self.translate_const(size).0.assert_primitive().0;
                                 ValueKind::ScalarPair(value, size_val)
@@ -1087,4 +1110,32 @@ fn scalar_signedness(scalar: Scalar) -> bool {
 
 fn return_slot() -> LocalId {
     LocalId::from_raw(la_arena::RawIdx::from(0))
+}
+
+fn get_int_ty(ty: &Ty, isa: &dyn TargetIsa) -> Option<(u8, bool)> {
+    Some(match ty.kind(Interner) {
+        TyKind::Scalar(hir_ty::Scalar::Int(int_ty)) => (
+            match int_ty {
+                chalk_ir::IntTy::Isize => isa.pointer_bytes(),
+                chalk_ir::IntTy::I8 => 1,
+                chalk_ir::IntTy::I16 => 2,
+                chalk_ir::IntTy::I32 => 4,
+                chalk_ir::IntTy::I64 => 8,
+                chalk_ir::IntTy::I128 => 16,
+            },
+            true,
+        ),
+        TyKind::Scalar(hir_ty::Scalar::Uint(uint_ty)) => (
+            match uint_ty {
+                chalk_ir::UintTy::Usize => isa.pointer_bytes(),
+                chalk_ir::UintTy::U8 => 1,
+                chalk_ir::UintTy::U16 => 2,
+                chalk_ir::UintTy::U32 => 4,
+                chalk_ir::UintTy::U64 => 8,
+                chalk_ir::UintTy::U128 => 16,
+            },
+            true,
+        ),
+        _ => return None,
+    })
 }
