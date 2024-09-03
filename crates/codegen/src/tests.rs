@@ -385,3 +385,16 @@ fn test() -> i32 {
         5,
     )
 }
+
+#[test]
+fn test_int_cast_1() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let i = -5i64;
+    i as i32
+}
+"#,
+        -5,
+    )
+}

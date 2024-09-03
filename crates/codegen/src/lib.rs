@@ -34,7 +34,7 @@ use hir_ty::{
     layout::{Layout, RustcFieldIdx},
     mir::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
-        StatementKind, TerminatorKind,
+        StatementKind, TerminatorKind, UnOp,
     },
     Interner, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
 };
@@ -450,6 +450,8 @@ impl<'a> FunctionTranslator<'a> {
             Rvalue::CheckedBinaryOp(binop, left, right) => {
                 self.translate_checked_binop(binop, left, right)
             }
+            Rvalue::UnaryOp(UnOp::Neg, op) => self.translate_neg(op),
+            Rvalue::UnaryOp(UnOp::Not, op) => self.translate_not(op),
             Rvalue::Ref(_, place) => {
                 let projection = place.projection.lookup(&self.body.projection_store);
                 let typ = self.module.isa().pointer_type();
@@ -1024,6 +1026,38 @@ impl<'a> FunctionTranslator<'a> {
             true,
             MemFlags::trusted(),
         )
+    }
+
+    fn translate_neg(&mut self, op: &Operand) -> ValueKind {
+        let (value, ty) = self.translate_operand_with_ty(op);
+        match ty.kind(Interner) {
+            TyKind::Scalar(hir_ty::Scalar::Int(_)) => {
+                let result = self.builder.ins().ineg(value.assert_primitive().0);
+                ValueKind::Primitive(result, true)
+            }
+            TyKind::Scalar(hir_ty::Scalar::Float(_)) => {
+                let result = self.builder.ins().fneg(value.assert_primitive().0);
+                ValueKind::Primitive(result, true)
+            }
+            _ => panic!("unsupported type for negation: {:?}", ty),
+        }
+    }
+
+    fn translate_not(&mut self, op: &Operand) -> ValueKind {
+        let (value, ty) = self.translate_operand_with_ty(op);
+        match ty.kind(Interner) {
+            TyKind::Scalar(hir_ty::Scalar::Int(_) | hir_ty::Scalar::Uint(_)) => {
+                let (value, signed) = value.assert_primitive();
+                let result = self.builder.ins().bnot(value);
+                ValueKind::Primitive(result, signed)
+            }
+            TyKind::Scalar(hir_ty::Scalar::Bool) => {
+                let value = value.assert_primitive().0;
+                let result = self.builder.ins().bxor_imm(value, 1);
+                ValueKind::Primitive(result, false)
+            }
+            _ => panic!("unsupported type for not: {:?}", ty),
+        }
     }
 }
 
