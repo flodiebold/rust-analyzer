@@ -313,9 +313,17 @@ impl<'a> FunctionTranslator<'a> {
         let block = self.blocks[self.body.start_block];
         self.builder.append_block_params_for_function_params(block);
         self.builder.switch_to_block(block);
-        let param_values = self.builder.block_params(block).to_vec();
-        for (param, val) in self.body.param_locals.iter().copied().zip(param_values) {
-            self.translate_local_store(param, val);
+        let mut param_values = self.builder.block_params(block).to_vec();
+        param_values.reverse();
+        for param in self.body.param_locals.iter().copied() {
+            match self.get_variable(param) {
+                LocalKind::Variable(var) => self.builder.def_var(var, param_values.pop().unwrap()),
+                LocalKind::VariablePair(var1, var2) => {
+                    self.builder.def_var(var1, param_values.pop().unwrap());
+                    self.builder.def_var(var2, param_values.pop().unwrap());
+                }
+                LocalKind::Stack(_) => panic!("unsupported param on stack"),
+            }
         }
     }
 
@@ -355,10 +363,15 @@ impl<'a> FunctionTranslator<'a> {
 
                 let args: Vec<_> = args
                     .iter()
-                    .map(|a| self.translate_operand(a))
-                    .map(|v| match v {
-                        ValueKind::Primitive(val, _) => val,
-                        _ => panic!("unsupported value in function call: {:?}", v),
+                    .flat_map(|a| {
+                        let v = self.translate_operand(a);
+                        match v {
+                            ValueKind::Primitive(val, _) => [val].to_vec(),
+                            ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
+                            ValueKind::Aggregate { slot, offset, size: _ } => {
+                                [self.translate_mem_slot_addr(slot, offset)].to_vec()
+                            }
+                        }
                     })
                     .collect();
                 let static_func_id = match func {
@@ -389,16 +402,24 @@ impl<'a> FunctionTranslator<'a> {
                     let shim = self.get_shim(func_id);
                     let func_ref = self.module.declare_func_in_func(shim, &mut self.builder.func);
                     let call = self.builder.ins().call(func_ref, &args);
-                    match self.builder.inst_results(call).len() {
-                        1 => {
-                            let result =
-                                ValueKind::Primitive(self.builder.inst_results(call)[0], false);
-                            self.translate_place_store(destination, result);
-                        }
-                        0 => {}
-                        _ => {
-                            panic!("unsupported multiple returns");
-                        }
+                    let (dest, ret_ty) = self.translate_place_with_ty(destination);
+                    let ret_ty_layout = self.ty_layout(ret_ty);
+                    let results = self.builder.inst_results(call).to_vec();
+                    if results.len() > 0 {
+                        let ret_val = match ret_ty_layout.abi {
+                            Abi::Uninhabited => panic!("uninhabited return"),
+                            Abi::Scalar(_) => {
+                                assert_eq!(results.len(), 1);
+                                ValueKind::Primitive(results[0], false)
+                            }
+                            Abi::ScalarPair(_, _) => {
+                                assert_eq!(results.len(), 2);
+                                ValueKind::ScalarPair(results[0], results[1])
+                            }
+                            Abi::Vector { .. } => panic!("unsupported vector return"),
+                            Abi::Aggregate { .. } => panic!("unsupported aggregate return"),
+                        };
+                        self.translate_place_kind_store(dest, ret_val);
                     }
                     if let Some(target) = target {
                         self.builder.ins().jump(self.blocks[*target], &[]);
@@ -614,9 +635,13 @@ impl<'a> FunctionTranslator<'a> {
     }
 
     fn translate_place(&mut self, place: &Place) -> PlaceKind {
+        self.translate_place_with_ty(place).0
+    }
+
+    fn translate_place_with_ty(&mut self, place: &Place) -> (PlaceKind, Ty) {
         let projection = place.projection.lookup(&self.body.projection_store);
         let local = place.local;
-        self.translate_local_with_projection(local, projection).0
+        self.translate_local_with_projection(local, projection)
     }
 
     fn translate_local_with_projection(
@@ -651,7 +676,8 @@ impl<'a> FunctionTranslator<'a> {
                     let ptr_typ = self.module.isa().pointer_type();
                     let elem_size =
                         self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
-                    let idx = self.translate_local_access(*idx);
+                    let idx =
+                        self.translate_copy_local_with_projection(*idx, &[]).0.assert_primitive().0;
                     let idx_offset = self.builder.ins().imul(idx, elem_size);
                     let addr = self.builder.ins().iadd(addr, idx_offset);
                     kind = PlaceKind::Mem(addr, 0);
@@ -743,9 +769,13 @@ impl<'a> FunctionTranslator<'a> {
             }
         }
     }
-
     fn translate_place_store(&mut self, place: &Place, value: ValueKind) {
-        match self.translate_place(place) {
+        let kind = self.translate_place(place);
+        self.translate_place_kind_store(kind, value)
+    }
+
+    fn translate_place_kind_store(&mut self, kind: PlaceKind, value: ValueKind) {
+        match kind {
             PlaceKind::Variable(var) => match value {
                 ValueKind::Primitive(val, _) => {
                     self.builder.def_var(var, val);
@@ -1009,24 +1039,6 @@ impl<'a> FunctionTranslator<'a> {
             },
         };
         (val, ty)
-    }
-
-    fn translate_local_access(&mut self, local: LocalId) -> Value {
-        let variable = self.get_variable(local);
-        match variable {
-            LocalKind::Variable(var) => self.builder.use_var(var),
-            LocalKind::VariablePair(_, _) => panic!("unsupported variable pair access"),
-            LocalKind::Stack(_) => panic!("unimplemented stack slot access"),
-        }
-    }
-
-    fn translate_local_store(&mut self, local: LocalId, value: Value) {
-        let variable = self.get_variable(local);
-        match variable {
-            LocalKind::Variable(var) => self.builder.def_var(var, value),
-            LocalKind::VariablePair(_, _) => panic!("unsupported variable pair store"),
-            LocalKind::Stack(_) => panic!("unimplemented stack slot store"),
-        }
     }
 
     fn translate_checked_binop(
