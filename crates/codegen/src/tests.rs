@@ -357,7 +357,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_struct() {
     check_i32(
         r#"

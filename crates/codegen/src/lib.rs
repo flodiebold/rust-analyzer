@@ -25,13 +25,12 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, FuncId, Module};
 use either::Either;
 use hir_def::{
-    db::EnumVariantDataWithDiagnosticsQuery,
     layout::{Abi, Scalar},
-    FunctionId,
+    FunctionId, Lookup,
 };
 use hir_ty::{
     db::HirDatabase,
-    layout::{Layout, RustcFieldIdx},
+    layout::{Layout, RustcEnumVariantIdx},
     mir::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind, UnOp,
@@ -548,12 +547,40 @@ impl<'a> FunctionTranslator<'a> {
                     }
                     Tuple(tuple_ty) => {
                         let layout = self.ty_layout(tuple_ty.clone());
-                        let fields = match &layout.fields {
-                            hir_def::layout::FieldsShape::Arbitrary {
-                                offsets,
-                                memory_index: _,
-                            } => offsets,
-                            _ => panic!("tuple with unsupported fields shape: {:?}", layout.fields),
+                        match layout.abi {
+                            Abi::ScalarPair(_, _) => {
+                                assert_eq!(operands.len(), 2);
+                                let val1 =
+                                    self.translate_operand(&operands[0]).assert_primitive().0;
+                                let val2 =
+                                    self.translate_operand(&operands[1]).assert_primitive().0;
+                                let val = ValueKind::ScalarPair(val1, val2);
+                                self.translate_place_store(place, val);
+                            }
+                            Abi::Aggregate { sized: true } => {
+                                for (i, op) in operands.iter().enumerate() {
+                                    let val = self.translate_operand(op);
+                                    let field_offset = layout.fields.offset(i);
+                                    self.translate_place_store_with_offset(
+                                        place,
+                                        field_offset.bytes_usize() as i32,
+                                        val,
+                                    );
+                                }
+                            }
+                            _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
+                        };
+                        return;
+                    }
+                    Adt(variant_id, subst) => {
+                        let adt = variant_id.adt_id(self.db.upcast());
+                        let ty = TyKind::Adt(chalk_ir::AdtId(adt), subst.clone()).intern(Interner);
+                        let layout = self.ty_layout(ty.clone());
+                        let layout = match layout.variants {
+                            hir_def::layout::Variants::Single { .. } => &layout,
+                            hir_def::layout::Variants::Multiple { .. } => {
+                                panic!("unsupported aggregate of enum")
+                            }
                         };
                         match layout.abi {
                             Abi::ScalarPair(_, _) => {
@@ -568,7 +595,7 @@ impl<'a> FunctionTranslator<'a> {
                             Abi::Aggregate { sized: true } => {
                                 for (i, op) in operands.iter().enumerate() {
                                     let val = self.translate_operand(op);
-                                    let field_offset = fields[RustcFieldIdx::new(i)];
+                                    let field_offset = layout.fields.offset(i);
                                     self.translate_place_store_with_offset(
                                         place,
                                         field_offset.bytes_usize() as i32,
@@ -635,6 +662,43 @@ impl<'a> FunctionTranslator<'a> {
                     let idx = tuple_idx.index as usize;
                     let layout = self.ty_layout(ty.clone());
                     ty = ty.as_tuple().unwrap().at(Interner, idx).assert_ty_ref(Interner).clone();
+                    match kind {
+                        PlaceKind::Variable(var) => {
+                            assert_eq!(0, idx);
+                            kind = PlaceKind::Variable(var);
+                        }
+                        PlaceKind::VariablePair(var1, var2) => {
+                            assert!(idx < 2);
+                            kind = PlaceKind::Variable(if idx == 0 { var1 } else { var2 });
+                        }
+                        PlaceKind::Stack(ss, off) => {
+                            let offset = layout.fields.offset(idx).bytes_usize();
+                            kind = PlaceKind::Stack(ss, off + offset as i32);
+                        }
+                        PlaceKind::Mem(addr, off) => {
+                            let offset = layout.fields.offset(idx).bytes_usize();
+                            kind = PlaceKind::Mem(addr, off + offset as i32);
+                        }
+                    }
+                }
+                ProjectionElem::Field(Either::Left(field_id)) => {
+                    let layout = self.ty_layout(ty.clone());
+                    let layout = match &layout.variants {
+                        hir_ty::layout::Variants::Single { .. } => &layout,
+                        hir_ty::layout::Variants::Multiple { variants, .. } => {
+                            &variants[match field_id.parent {
+                                hir_def::VariantId::EnumVariantId(it) => {
+                                    RustcEnumVariantIdx(it.lookup(self.db.upcast()).index as usize)
+                                }
+                                _ => panic!("multiple variants in non-enum"),
+                            }]
+                        }
+                    };
+                    let idx = u32::from(field_id.local_id.into_raw()) as usize;
+                    let (_, subst) = ty.as_adt().expect("non-adt field access");
+                    ty = self.db.field_types(field_id.parent)[field_id.local_id]
+                        .clone()
+                        .substitute(Interner, subst);
                     match kind {
                         PlaceKind::Variable(var) => {
                             assert_eq!(0, idx);
