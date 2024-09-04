@@ -27,6 +27,7 @@ span.workspace = true
 triomphe.workspace = true
 smallvec.workspace = true
 either.workspace = true
+salsa.workspace = true
 
 chalk-ir.workspace = true
 

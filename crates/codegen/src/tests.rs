@@ -1,8 +1,9 @@
 use hir_def::db::DefDatabase;
+use hir_ty::{Interner, Substitution};
 use span::{Edition, EditionedFileId};
 use test_fixture::WithFixture;
 
-use crate::{test_db::TestDB, JitEngine};
+use crate::{test_db::TestDB, CodegenDatabase, JitEngine};
 
 fn eval_fn_i32(db: &TestDB, file_id: EditionedFileId) -> Result<i32, String> {
     let module_id = db.module_for_file(file_id);
@@ -21,9 +22,10 @@ fn eval_fn_i32(db: &TestDB, file_id: EditionedFileId) -> Result<i32, String> {
             _ => None,
         })
         .expect("no test function found");
+    let mono_func_id = db.intern_mono_function(crate::MonoFunction { func: func_id, subst: Substitution::empty(Interner) });
 
     let engine = JitEngine::new(db);
-    let code = engine.jit.lock().unwrap().compile(db, func_id, &engine).unwrap();
+    let code = engine.jit.lock().unwrap().compile(db, mono_func_id, &engine).unwrap();
     let func = unsafe { std::mem::transmute::<_, fn() -> i32>(code) };
     let result = func();
     Ok(result)
@@ -371,7 +373,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_generic_call() {
     check_i32(
         r#"

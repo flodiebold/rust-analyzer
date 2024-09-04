@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context};
-use base_db::salsa::InternKey;
+use base_db::{impl_intern_key, salsa::InternKey, Upcast};
 use cranelift::{
     codegen::{self, ir::StackSlot},
     frontend::Switch,
@@ -39,19 +39,20 @@ use hir_ty::{
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
+use salsa::InternValueTrivial;
 use smallvec::SmallVec;
 use triomphe::Arc;
 
 #[derive(Clone)]
 pub struct JitEngine<'a> {
     jit: Arc<Mutex<Jit>>,
-    db: &'a dyn HirDatabase,
+    db: &'a dyn CodegenDatabase,
 }
 
 extern "C" fn ensure_function(engine: &JitEngine, func_id: u32) -> *const u8 {
     let jit = engine.jit.clone();
     let mut jit = jit.lock().unwrap();
-    let func_id = FunctionId::from_intern_id(func_id.into());
+    let func_id = MonoFunctionId::from_intern_id(func_id.into());
     let code = catch_unwind(AssertUnwindSafe(|| jit.compile(engine.db, func_id, engine).unwrap()))
         .unwrap_or_else(|err| {
             eprintln!("failed to compile function {}: {:?}", func_id.as_intern_id().as_u32(), err);
@@ -61,7 +62,7 @@ extern "C" fn ensure_function(engine: &JitEngine, func_id: u32) -> *const u8 {
 }
 
 impl<'a> JitEngine<'a> {
-    pub fn new(db: &'a dyn HirDatabase) -> JitEngine {
+    pub fn new(db: &'a dyn CodegenDatabase) -> JitEngine {
         JitEngine { jit: Arc::new(Mutex::new(Jit::default())), db }
     }
 }
@@ -83,8 +84,8 @@ pub struct Jit {
     /// functions.
     module: JITModule,
 
-    compiled_functions: FxHashMap<FunctionId, FuncId>,
-    shims: FxHashMap<FunctionId, FuncId>,
+    compiled_functions: FxHashMap<MonoFunctionId, FuncId>,
+    shims: FxHashMap<MonoFunctionId, FuncId>,
 }
 
 // FIXME: cleanup of Jit (needs to call free_memory())
@@ -121,27 +122,24 @@ impl Default for Jit {
 impl Jit {
     fn compile(
         &mut self,
-        db: &dyn HirDatabase,
-        func_id: FunctionId,
+        db: &dyn CodegenDatabase,
+        mono_func_id: MonoFunctionId,
         jit_engine: &JitEngine,
     ) -> Result<*const u8, anyhow::Error> {
-        if let Some(f) = self.compiled_functions.get(&func_id) {
+        if let Some(f) = self.compiled_functions.get(&mono_func_id) {
             // FIXME check for changes to the function since the last compilation
             // FIXME also cache error?
             return Ok(self.module.get_finalized_function(*f));
         }
 
+        let MonoFunction { func: func_id, subst } = db.lookup_intern_mono_function(mono_func_id);
         let data = db.function_data(func_id);
         eprintln!(
             "Compiling function {} ({})",
             func_id.as_intern_id().as_u32(),
             data.name.as_str()
         );
-        let (sig, binders) =
-            db.callable_item_signature(func_id.into()).into_value_and_skipped_binders();
-        if !binders.is_empty(Interner) {
-            panic!("unsupported generic func");
-        }
+        let sig = db.callable_item_signature(func_id.into()).substitute(Interner, &subst);
 
         let env = db.trait_environment(func_id.into());
 
@@ -150,7 +148,7 @@ impl Jit {
         let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
 
         let body = db
-            .monomorphized_mir_body(func_id.into(), Substitution::empty(Interner), env.clone())
+            .monomorphized_mir_body(func_id.into(), subst, env.clone())
             .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
 
         let mut translator = FunctionTranslator {
@@ -179,7 +177,7 @@ impl Jit {
             .declare_anonymous_function(&self.ctx.func.signature)
             .context("failed to declare function")?;
 
-        self.compiled_functions.insert(func_id, id);
+        self.compiled_functions.insert(mono_func_id, id);
 
         // Define the function to jit. This finishes compilation, although
         // there may be outstanding relocations to perform. Currently, jit
@@ -204,13 +202,13 @@ impl Jit {
 }
 
 struct FunctionTranslator<'a> {
-    db: &'a dyn HirDatabase,
+    db: &'a dyn CodegenDatabase,
     body: &'a MirBody,
     variables: ArenaMap<LocalId, LocalKind>,
     blocks: ArenaMap<BasicBlockId, Block>,
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
-    shims: &'a mut FxHashMap<FunctionId, FuncId>,
+    shims: &'a mut FxHashMap<MonoFunctionId, FuncId>,
     env: Arc<TraitEnvironment>,
     engine: &'a JitEngine<'a>,
 }
@@ -244,16 +242,13 @@ enum MemSlot {
 }
 
 impl<'a> FunctionTranslator<'a> {
-    fn get_shim(&mut self, func: FunctionId) -> FuncId {
-        if let Some(shim) = self.shims.get(&func) {
+    fn get_shim(&mut self, mono_func_id: MonoFunctionId) -> FuncId {
+        if let Some(shim) = self.shims.get(&mono_func_id) {
             return *shim;
         }
 
-        let (sig, binders) =
-            self.db.callable_item_signature(func.into()).into_value_and_skipped_binders();
-        if !binders.is_empty(Interner) {
-            panic!("unsupported generic func");
-        }
+        let MonoFunction { func, subst } = self.db.lookup_intern_mono_function(mono_func_id);
+        let sig = self.db.callable_item_signature(func.into()).substitute(Interner, &subst);
 
         let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
         ctx.func.signature = translate_signature(&sig, self.module.isa(), self.db, &self.env);
@@ -282,7 +277,7 @@ impl<'a> FunctionTranslator<'a> {
         // FIXME can we pass engine and address of ensure_function as "global value" / "VM context pointer"?
         // FIXME also maybe just import the function? if that works? (need to declare it as exported though)
         let arg1 = builder.ins().iconst(ptr, self.engine as *const JitEngine as i64);
-        let arg2 = builder.ins().iconst(types::I32, func.as_intern_id().as_u32() as i64);
+        let arg2 = builder.ins().iconst(types::I32, mono_func_id.as_intern_id().as_u32() as i64);
         let callee = builder.ins().iconst(ptr, ensure_function as usize as i64);
         let call = builder.ins().call_indirect(sig_ref, callee, &[arg1, arg2]);
         let result = builder.inst_results(call)[0];
@@ -369,13 +364,16 @@ impl<'a> FunctionTranslator<'a> {
                 let static_func_id = match func {
                     Operand::Constant(konst) => match konst.data(Interner).ty.kind(Interner) {
                         TyKind::FnDef(func_id, subst) => {
-                            if !subst.is_empty(Interner) {
-                                panic!("unsupported generic function call")
-                            }
                             let callable_def =
                                 self.db.lookup_intern_callable_def((*func_id).into());
+                            let subst = subst.clone();
                             match callable_def {
-                                hir_def::CallableDefId::FunctionId(func_id) => Some(func_id),
+                                hir_def::CallableDefId::FunctionId(func_id) => {
+                                    Some(self.db.intern_mono_function(MonoFunction {
+                                        func: func_id,
+                                        subst,
+                                    }))
+                                }
                                 _ => {
                                     panic!("unsupported struct/enum constructor");
                                 }
@@ -1134,10 +1132,32 @@ impl ValueKind {
     }
 }
 
+#[salsa::query_group(CodegenDatabaseStorage)]
+pub trait CodegenDatabase: HirDatabase + Upcast<dyn HirDatabase> {
+    #[salsa::interned]
+    fn intern_mono_function(&self, mf: MonoFunction) -> MonoFunctionId;
+}
+
+#[test]
+fn codegen_database_is_object_safe() {
+    fn _assert_object_safe(_: &dyn CodegenDatabase) {}
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct MonoFunction {
+    func: FunctionId,
+    subst: Substitution,
+}
+impl InternValueTrivial for MonoFunction {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct MonoFunctionId(salsa::InternId);
+impl_intern_key!(MonoFunctionId);
+
 fn translate_signature(
     sig: &hir_ty::CallableSig,
     isa: &dyn TargetIsa,
-    db: &dyn HirDatabase,
+    db: &dyn CodegenDatabase,
     env: &Arc<TraitEnvironment>,
 ) -> Signature {
     let call_conv = match sig.abi() {

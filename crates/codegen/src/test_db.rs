@@ -8,6 +8,7 @@ use base_db::{
 };
 use hir_def::{db::DefDatabase, ModuleId};
 use hir_expand::db::ExpandDatabase;
+use hir_ty::db::HirDatabase;
 use rustc_hash::FxHashMap;
 use span::{EditionedFileId, FileId};
 use syntax::TextRange;
@@ -20,7 +21,8 @@ use triomphe::Arc;
     hir_expand::db::ExpandDatabaseStorage,
     hir_def::db::InternDatabaseStorage,
     hir_def::db::DefDatabaseStorage,
-    hir_ty::db::HirDatabaseStorage
+    hir_ty::db::HirDatabaseStorage,
+    crate::CodegenDatabaseStorage,
 )]
 pub(crate) struct TestDB {
     storage: salsa::Storage<TestDB>,
@@ -50,6 +52,12 @@ impl Upcast<dyn ExpandDatabase> for TestDB {
 
 impl Upcast<dyn DefDatabase> for TestDB {
     fn upcast(&self) -> &(dyn DefDatabase + 'static) {
+        self
+    }
+}
+
+impl Upcast<dyn HirDatabase> for TestDB {
+    fn upcast(&self) -> &(dyn HirDatabase + 'static) {
         self
     }
 }
