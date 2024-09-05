@@ -17,8 +17,8 @@ use cranelift::{
     prelude::{
         isa::{CallConv, TargetIsa},
         settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
-        FunctionBuilderContext, InstBuilder, IntCC, MemFlags, Signature, StackSlotData, Type,
-        Value, Variable,
+        FunctionBuilderContext, Imm64, InstBuilder, IntCC, MemFlags, Signature, StackSlotData,
+        Type, Value, Variable,
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
@@ -35,7 +35,7 @@ use hir_ty::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind, UnOp,
     },
-    Interner, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
+    FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
@@ -103,11 +103,6 @@ impl Default for Jit {
         builder.hotswap(true);
 
         let module = JITModule::new(builder);
-        // let mut signature = Signature::new(module.isa().default_call_conv());
-        // signature.params.push(AbiParam::new(module.isa().pointer_type()));
-        // signature.params.push(AbiParam::new(types::I32));
-        // signature.returns.push(AbiParam::new(module.isa().pointer_type()));
-        // module.declare_function("ensure_function", Linkage::Import, &signature).unwrap();
         Self {
             builder_context: FunctionBuilderContext::new(),
             ctx: module.make_context(),
@@ -140,6 +135,11 @@ impl Jit {
             data.name.as_str()
         );
         let sig = db.callable_item_signature(func_id.into()).substitute(Interner, &subst);
+
+        match sig.abi() {
+            FnAbi::Rust => {}
+            _ => panic!("unsupported abi for function: {:?}", sig.abi()),
+        };
 
         let env = db.trait_environment(func_id.into());
 
@@ -249,6 +249,11 @@ impl<'a> FunctionTranslator<'a> {
 
         let MonoFunction { func, subst } = self.db.lookup_intern_mono_function(mono_func_id);
         let sig = self.db.callable_item_signature(func.into()).substitute(Interner, &subst);
+
+        match sig.abi() {
+            FnAbi::Rust => {}
+            _ => panic!("unsupported abi for shim: {:?}", sig.abi()),
+        };
 
         let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
         ctx.func.signature = translate_signature(&sig, self.module.isa(), self.db, &self.env);
@@ -380,13 +385,16 @@ impl<'a> FunctionTranslator<'a> {
                             let callable_def =
                                 self.db.lookup_intern_callable_def((*func_id).into());
                             let subst = subst.clone();
+                            let abi =
+                                self.db.callable_item_signature(callable_def).skip_binders().abi();
                             match callable_def {
-                                hir_def::CallableDefId::FunctionId(func_id) => {
-                                    Some(self.db.intern_mono_function(MonoFunction {
+                                hir_def::CallableDefId::FunctionId(func_id) => Some((
+                                    abi,
+                                    self.db.intern_mono_function(MonoFunction {
                                         func: func_id,
                                         subst,
-                                    }))
-                                }
+                                    }),
+                                )),
                                 _ => {
                                     panic!("unsupported struct/enum constructor");
                                 }
@@ -398,38 +406,55 @@ impl<'a> FunctionTranslator<'a> {
                 };
                 // FIXME order of operations? first args or first func?
 
-                if let Some(func_id) = static_func_id {
-                    let shim = self.get_shim(func_id);
-                    let func_ref = self.module.declare_func_in_func(shim, &mut self.builder.func);
-                    let call = self.builder.ins().call(func_ref, &args);
-                    let (dest, ret_ty) = self.translate_place_with_ty(destination);
-                    let ret_ty_layout = self.ty_layout(ret_ty);
-                    let results = self.builder.inst_results(call).to_vec();
-                    if results.len() > 0 {
-                        let ret_val = match ret_ty_layout.abi {
-                            Abi::Uninhabited => panic!("uninhabited return"),
-                            Abi::Scalar(_) => {
-                                assert_eq!(results.len(), 1);
-                                ValueKind::Primitive(results[0], false)
-                            }
-                            Abi::ScalarPair(_, _) => {
-                                assert_eq!(results.len(), 2);
-                                ValueKind::ScalarPair(results[0], results[1])
-                            }
-                            Abi::Vector { .. } => panic!("unsupported vector return"),
-                            Abi::Aggregate { .. } => panic!("unsupported aggregate return"),
-                        };
-                        self.translate_place_kind_store(dest, ret_val);
+                match static_func_id {
+                    Some((FnAbi::RustIntrinsic, func_id)) => {
+                        self.translate_rust_intrinsic_call(
+                            func_id,
+                            &args,
+                            destination,
+                            *target,
+                            *cleanup,
+                        );
                     }
-                    if let Some(target) = target {
-                        self.builder.ins().jump(self.blocks[*target], &[]);
+                    Some((_abi, func_id)) => {
+                        let shim = self.get_shim(func_id);
+                        let func_ref =
+                            self.module.declare_func_in_func(shim, &mut self.builder.func);
+                        let call = self.builder.ins().call(func_ref, &args);
+                        let results = self.builder.inst_results(call).to_vec();
+                        self.store_func_call_return(&results, destination);
+                        if let Some(target) = target {
+                            self.builder.ins().jump(self.blocks[*target], &[]);
+                        }
                     }
-                } else {
-                    let _func = self.translate_operand(func);
-                    panic!("unsupported indirect call");
+                    _ => {
+                        let _func = self.translate_operand(func);
+                        panic!("unsupported indirect call");
+                    }
                 }
             }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
+        }
+    }
+
+    fn store_func_call_return(&mut self, results: &[Value], destination: &Place) {
+        let (dest, ret_ty) = self.translate_place_with_ty(destination);
+        let ret_ty_layout = self.ty_layout(ret_ty);
+        if results.len() > 0 {
+            let ret_val = match ret_ty_layout.abi {
+                Abi::Uninhabited => panic!("uninhabited return"),
+                Abi::Scalar(_) => {
+                    assert_eq!(results.len(), 1);
+                    ValueKind::Primitive(results[0], false)
+                }
+                Abi::ScalarPair(_, _) => {
+                    assert_eq!(results.len(), 2);
+                    ValueKind::ScalarPair(results[0], results[1])
+                }
+                Abi::Vector { .. } => panic!("unsupported vector return"),
+                Abi::Aggregate { .. } => panic!("unsupported aggregate return"),
+            };
+            self.translate_place_kind_store(dest, ret_val);
         }
     }
 
@@ -948,26 +973,59 @@ impl<'a> FunctionTranslator<'a> {
         let chalk_ir::ConstValue::Concrete(c) = &konst.data(Interner).value else {
             panic!("evaluating non concrete constant");
         };
-        let val = match &c.interned {
-            hir_ty::ConstScalar::Bytes(bytes, _mm) => {
-                let layout = self.ty_layout(ty.clone());
-                match layout.abi {
-                    Abi::Uninhabited => unreachable!(),
-                    Abi::Scalar(scalar) => {
-                        let typ = translate_scalar_type(scalar, self.module.isa());
-                        let signed = scalar_signedness(scalar);
-                        let mut data: [u8; 8] = [0; 8];
-                        data[0..bytes.len()].copy_from_slice(&bytes);
-                        ValueKind::Primitive(
-                            self.builder.ins().iconst(typ, i64::from_le_bytes(data)),
-                            signed,
-                        )
-                    }
-                    _ => panic!("unsupported abi for const: {:?}", layout.abi),
-                }
+        let hir_ty::ConstScalar::Bytes(bytes, mm) = &c.interned else {
+            panic!("bad const: {:?}", c.interned)
+        };
+        let layout = self.ty_layout(ty.clone());
+        let memory_addr = match mm {
+            MemoryMap::Empty => None,
+            MemoryMap::Simple(bytes) => {
+                let data = self
+                    .module
+                    .declare_anonymous_data(false, false)
+                    .expect("failed to create data");
+                let mut desc = DataDescription::new();
+                desc.define(bytes.clone());
+                self.module.define_data(data, &desc).expect("failed to define data");
+                let global = self.module.declare_data_in_func(data, &mut self.builder.func);
+                let ptr_type = self.module.isa().pointer_type();
+                let addr = self.builder.ins().global_value(ptr_type, global);
+                Some(addr)
             }
-            hir_ty::ConstScalar::UnevaluatedConst(_, _) => panic!("unevaluated const"),
-            hir_ty::ConstScalar::Unknown => panic!("unknown const scalar"),
+            _ => panic!("unsupported memory map in const: {:?}", mm),
+        };
+        let is_ref = ty.as_reference_or_ptr().is_some();
+        let val = match layout.abi {
+            Abi::Uninhabited => unreachable!(),
+            Abi::Scalar(scalar) => {
+                let typ = translate_scalar_type(scalar, self.module.isa());
+                let signed = scalar_signedness(scalar);
+                let val = bytes_to_imm64(bytes);
+                let val = if is_ref {
+                    let addr = memory_addr.expect("ref const without memory");
+                    self.builder.ins().iadd_imm(addr, val)
+                } else {
+                    self.builder.ins().iconst(typ, val)
+                };
+                ValueKind::Primitive(val, signed)
+            }
+            Abi::ScalarPair(s1, s2) => {
+                let typ1 = translate_scalar_type(s1, self.module.isa());
+                let typ2 = translate_scalar_type(s2, self.module.isa());
+                let val1 = bytes_to_imm64(&bytes[..typ1.bytes() as usize]);
+                let val1 = if is_ref {
+                    let addr = memory_addr.expect("ref const without memory");
+                    self.builder.ins().iadd_imm(addr, val1)
+                } else {
+                    self.builder.ins().iconst(typ1, val1)
+                };
+                let val2 = self
+                    .builder
+                    .ins()
+                    .iconst(typ2, bytes_to_imm64(&bytes[typ1.bytes() as usize..]));
+                ValueKind::ScalarPair(val1, val2)
+            }
+            _ => panic!("unsupported abi for const: {:?}", layout.abi),
         };
         (val, ty)
     }
@@ -1133,6 +1191,43 @@ impl<'a> FunctionTranslator<'a> {
             _ => panic!("unsupported type for not: {:?}", ty),
         }
     }
+
+    fn translate_rust_intrinsic_call(
+        &mut self,
+        func_id: MonoFunctionId,
+        args: &[Value],
+        destination: &Place,
+        target: Option<BasicBlockId>,
+        cleanup: Option<BasicBlockId>,
+    ) {
+        let MonoFunction { func, subst } = self.db.lookup_intern_mono_function(func_id);
+        let function_data = self.db.function_data(func);
+        let func_name = function_data.name.as_str();
+        match func_name {
+            "transmute" => self.translate_transmute(subst, args, destination, target, cleanup),
+            _ => panic!("unsupported intrinsic: {:?}", func_name),
+        }
+    }
+
+    fn translate_transmute(
+        &mut self,
+        _subst: Substitution,
+        args: &[Value],
+        destination: &Place,
+        target: Option<BasicBlockId>,
+        _cleanup: Option<BasicBlockId>,
+    ) {
+        self.store_func_call_return(args, destination);
+        if let Some(target) = target {
+            self.builder.ins().jump(self.blocks[target], &[]);
+        }
+    }
+}
+
+fn bytes_to_imm64(bytes: &[u8]) -> Imm64 {
+    let mut data: [u8; 8] = [0; 8];
+    data[0..bytes.len()].copy_from_slice(&bytes);
+    Imm64::new(i64::from_le_bytes(data))
 }
 
 impl ValueKind {

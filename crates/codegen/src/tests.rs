@@ -297,7 +297,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_str_literal() {
     check_i32(
         r#"
@@ -313,7 +312,7 @@ fn test() -> i32 {
     byte as i32
 }
 "#,
-        5,
+        104,
     )
 }
 

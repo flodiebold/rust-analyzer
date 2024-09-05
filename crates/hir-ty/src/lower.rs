@@ -1855,12 +1855,24 @@ fn fn_sig_for_fn(db: &dyn HirDatabase, def: FunctionId) -> PolyFnSig {
         .with_type_param_mode(ParamLoweringMode::Variable);
     let ret = ctx_ret.lower_ty(&data.ret_type);
     let generics = generics(db.upcast(), def.into());
+    let abi = data
+        .abi
+        .as_ref()
+        .map(FnAbi::from_symbol)
+        .or_else(|| match def.lookup(db.upcast()).container {
+            hir_def::ItemContainerId::ExternBlockId(block) => {
+                let id = block.lookup(db.upcast()).id;
+                id.item_tree(db.upcast())[id.value].abi.as_ref().map(FnAbi::from_symbol)
+            }
+            _ => None,
+        })
+        .unwrap_or(FnAbi::Rust);
     let sig = CallableSig::from_params_and_return(
         params,
         ret,
         data.is_varargs(),
         if data.is_unsafe() { Safety::Unsafe } else { Safety::Safe },
-        data.abi.as_ref().map_or(FnAbi::Rust, FnAbi::from_symbol),
+        abi,
     );
     make_binders(db, &generics, sig)
 }
