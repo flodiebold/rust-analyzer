@@ -26,7 +26,7 @@ use cranelift_module::{DataDescription, FuncId, Module};
 use either::Either;
 use hir_def::{
     layout::{Abi, Scalar},
-    FunctionId, Lookup,
+    CallableDefId, FunctionId, Lookup,
 };
 use hir_ty::{
     db::HirDatabase,
@@ -35,7 +35,8 @@ use hir_ty::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind, UnOp,
     },
-    FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
+    AdtId, FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt,
+    TyKind,
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
@@ -365,6 +366,49 @@ impl<'a> FunctionTranslator<'a> {
                 if cleanup.is_some() {
                     panic!("unsupported unwind");
                 }
+                let static_func_id = match func {
+                    Operand::Constant(konst) => match konst.data(Interner).ty.kind(Interner) {
+                        TyKind::FnDef(func_id, subst) => {
+                            let callable_def =
+                                self.db.lookup_intern_callable_def((*func_id).into());
+                            let subst = subst.clone();
+                            let abi =
+                                self.db.callable_item_signature(callable_def).skip_binders().abi();
+                            Some((abi, callable_def, subst))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                // FIXME order of operations? first args or first func?
+
+                if let Some((
+                    abi,
+                    id @ (CallableDefId::StructId(_) | CallableDefId::EnumVariantId(_)),
+                    subst,
+                )) = static_func_id
+                {
+                    // handle tuple struct/enum constructor specially
+                    assert_eq!(abi, FnAbi::Rust);
+                    match id {
+                        CallableDefId::StructId(s) => {
+                            let ty = TyKind::Adt(AdtId(s.into()), subst).intern(Interner);
+                            self.store_tuple(ty, destination, &args);
+                        }
+                        CallableDefId::EnumVariantId(ev) => {
+                            let _ty_kind = TyKind::Adt(
+                                AdtId(ev.lookup(self.db.upcast()).parent.into()),
+                                subst,
+                            );
+                            panic!("unsupported enum variant constructor")
+                        }
+                        _ => unreachable!(),
+                    };
+                    if let Some(target) = target {
+                        self.builder.ins().jump(self.blocks[*target], &[]);
+                    }
+                    return;
+                }
 
                 let args: Vec<_> = args
                     .iter()
@@ -379,45 +423,22 @@ impl<'a> FunctionTranslator<'a> {
                         }
                     })
                     .collect();
-                let static_func_id = match func {
-                    Operand::Constant(konst) => match konst.data(Interner).ty.kind(Interner) {
-                        TyKind::FnDef(func_id, subst) => {
-                            let callable_def =
-                                self.db.lookup_intern_callable_def((*func_id).into());
-                            let subst = subst.clone();
-                            let abi =
-                                self.db.callable_item_signature(callable_def).skip_binders().abi();
-                            match callable_def {
-                                hir_def::CallableDefId::FunctionId(func_id) => Some((
-                                    abi,
-                                    self.db.intern_mono_function(MonoFunction {
-                                        func: func_id,
-                                        subst,
-                                    }),
-                                )),
-                                _ => {
-                                    panic!("unsupported struct/enum constructor");
-                                }
-                            }
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                // FIXME order of operations? first args or first func?
 
                 match static_func_id {
-                    Some((FnAbi::RustIntrinsic, func_id)) => {
+                    Some((FnAbi::RustIntrinsic, CallableDefId::FunctionId(func_id), subst)) => {
                         self.translate_rust_intrinsic_call(
                             func_id,
+                            subst,
                             &args,
                             destination,
                             *target,
                             *cleanup,
                         );
                     }
-                    Some((_abi, func_id)) => {
-                        let shim = self.get_shim(func_id);
+                    Some((_abi, CallableDefId::FunctionId(func_id), subst)) => {
+                        let mono_func_id =
+                            self.db.intern_mono_function(MonoFunction { func: func_id, subst });
+                        let shim = self.get_shim(mono_func_id);
                         let func_ref =
                             self.module.declare_func_in_func(shim, &mut self.builder.func);
                         let call = self.builder.ins().call(func_ref, &args);
@@ -427,10 +448,11 @@ impl<'a> FunctionTranslator<'a> {
                             self.builder.ins().jump(self.blocks[*target], &[]);
                         }
                     }
-                    _ => {
+                    None => {
                         let _func = self.translate_operand(func);
                         panic!("unsupported indirect call");
                     }
+                    _ => unreachable!(),
                 }
             }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
@@ -587,34 +609,9 @@ impl<'a> FunctionTranslator<'a> {
                                 val,
                             );
                         }
-                        return;
                     }
                     Tuple(tuple_ty) => {
-                        let layout = self.ty_layout(tuple_ty.clone());
-                        match layout.abi {
-                            Abi::ScalarPair(_, _) => {
-                                assert_eq!(operands.len(), 2);
-                                let val1 =
-                                    self.translate_operand(&operands[0]).assert_primitive().0;
-                                let val2 =
-                                    self.translate_operand(&operands[1]).assert_primitive().0;
-                                let val = ValueKind::ScalarPair(val1, val2);
-                                self.translate_place_store(place, val);
-                            }
-                            Abi::Aggregate { sized: true } => {
-                                for (i, op) in operands.iter().enumerate() {
-                                    let val = self.translate_operand(op);
-                                    let field_offset = layout.fields.offset(i);
-                                    self.translate_place_store_with_offset(
-                                        place,
-                                        field_offset.bytes_usize() as i32,
-                                        val,
-                                    );
-                                }
-                            }
-                            _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
-                        };
-                        return;
+                        self.store_tuple(tuple_ty.clone(), place, operands);
                     }
                     Adt(variant_id, subst) => {
                         let adt = variant_id.adt_id(self.db.upcast());
@@ -649,10 +646,10 @@ impl<'a> FunctionTranslator<'a> {
                             }
                             _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
                         };
-                        return;
                     }
                     _ => panic!("unsupported aggregate: {:?}", kind),
                 }
+                return;
             }
             _ => panic!("unsupported rvalue: {:?}", rvalue),
         };
@@ -1194,14 +1191,15 @@ impl<'a> FunctionTranslator<'a> {
 
     fn translate_rust_intrinsic_call(
         &mut self,
-        func_id: MonoFunctionId,
+        func_id: FunctionId,
+        subst: Substitution,
         args: &[Value],
         destination: &Place,
         target: Option<BasicBlockId>,
         cleanup: Option<BasicBlockId>,
     ) {
-        let MonoFunction { func, subst } = self.db.lookup_intern_mono_function(func_id);
-        let function_data = self.db.function_data(func);
+        // FIXME might want to share more/less code with the normal rust call code
+        let function_data = self.db.function_data(func_id);
         let func_name = function_data.name.as_str();
         match func_name {
             "transmute" => self.translate_transmute(subst, args, destination, target, cleanup),
@@ -1217,10 +1215,41 @@ impl<'a> FunctionTranslator<'a> {
         target: Option<BasicBlockId>,
         _cleanup: Option<BasicBlockId>,
     ) {
+        // FIXME check validity?
         self.store_func_call_return(args, destination);
         if let Some(target) = target {
             self.builder.ins().jump(self.blocks[target], &[]);
         }
+    }
+
+    fn store_tuple(&mut self, tuple_ty: Ty, place: &Place, operands: &[Operand]) {
+        let layout = self.ty_layout(tuple_ty.clone());
+        match layout.abi {
+            Abi::Scalar(_) => {
+                assert_eq!(operands.len(), 1);
+                let val = self.translate_operand(&operands[0]);
+                self.translate_place_store(place, val);
+            }
+            Abi::ScalarPair(_, _) => {
+                assert_eq!(operands.len(), 2);
+                let val1 = self.translate_operand(&operands[0]).assert_primitive().0;
+                let val2 = self.translate_operand(&operands[1]).assert_primitive().0;
+                let val = ValueKind::ScalarPair(val1, val2);
+                self.translate_place_store(place, val);
+            }
+            Abi::Aggregate { sized: true } => {
+                for (i, op) in operands.iter().enumerate() {
+                    let val = self.translate_operand(op);
+                    let field_offset = layout.fields.offset(i);
+                    self.translate_place_store_with_offset(
+                        place,
+                        field_offset.bytes_usize() as i32,
+                        val,
+                    );
+                }
+            }
+            _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
+        };
     }
 }
 

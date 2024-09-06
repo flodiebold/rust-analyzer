@@ -1,5 +1,5 @@
 use hir_def::db::DefDatabase;
-use hir_ty::{Interner, Substitution};
+use hir_ty::{db::HirDatabase, Interner, Substitution};
 use span::{Edition, EditionedFileId};
 use test_fixture::WithFixture;
 
@@ -358,6 +358,20 @@ fn test() -> i32 {
 }
 
 #[test]
+fn test_tuple_4() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let t = (5,);
+    let (a,) = t;
+    a
+}
+"#,
+        5,
+    )
+}
+
+#[test]
 fn test_struct() {
     check_i32(
         r#"
@@ -395,5 +409,179 @@ fn test() -> i32 {
 }
 "#,
         -5,
+    )
+}
+
+#[test]
+fn test_local_aggregate() {
+    check_i32(
+        r#"
+//- minicore: add, builtin_impls
+struct Foo {
+  a: i64,
+  b: i64,
+  c: i32,
+}
+fn test() -> i32 {
+    let foo = Foo {
+        a: 1,
+        b: 2,
+        c: 2,
+    };
+    foo.a as i32 + foo.b as i32 + foo.c
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_local_aggregate_ref() {
+    check_i32(
+        r#"
+//- minicore: add, builtin_impls
+struct Foo {
+  a: i64,
+  b: i64,
+  c: i32,
+}
+fn test() -> i32 {
+    let foo = Foo {
+        a: 1,
+        b: 2,
+        c: 2,
+    };
+    let r = &foo;
+    r.a as i32 + r.b as i32 + r.c
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_local_tuple_constructor_1() {
+    check_i32(
+        r#"
+struct Foo(i32);
+fn test() -> i32 {
+    let foo = Foo(5);
+    foo.0
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_local_tuple_constructor_2() {
+    check_i32(
+        r#"
+//- minicore: add, builtin_impls
+struct Foo(i64, i32);
+fn test() -> i32 {
+    let foo = Foo(3, 2);
+    foo.0 as i32 + foo.1
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_local_tuple_constructor_3() {
+    check_i32(
+        r#"
+//- minicore: add, builtin_impls
+struct Foo(i64, i64, i32);
+fn test() -> i32 {
+    let foo = Foo(1, 2, 2);
+    foo.0 as i32 + foo.1 as i32 + foo.2
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_func_param_aggregate() {
+    check_i32(
+        r#"
+//- minicore: add, builtin_impls
+struct Foo {
+  a: i64,
+  b: i64,
+  c: i32,
+}
+fn func(foo: Foo) -> i32 {
+    foo.a as i32 + foo.b as i32 + foo.c
+}
+fn test() -> i32 {
+    func(Foo {
+        a: 1,
+        b: 2,
+        c: 2,
+    })
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_enum_1() {
+    check_i32(
+        r#"
+enum Enum {
+    A, B,
+}
+fn test() -> i32 {
+    let foo = Enum::A;
+    match foo {
+        Enum::A => 5,
+        Enum::B => 3,
+    }
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_enum_2() {
+    check_i32(
+        r#"
+enum Enum {
+    A, B,
+}
+fn test() -> i32 {
+    let foo = Enum::B;
+    match foo {
+        Enum::A => 3,
+        Enum::B => 5,
+    }
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_option() {
+    check_i32(
+        r#"
+enum Option<T> {
+    None,
+    Some(T),
+}
+fn test() -> i32 {
+    let foo = Option::Some(5);
+    match foo {
+        Option::Some(i) => i,
+        Option::None => 0,
+    }
+}
+"#,
+        5,
     )
 }
