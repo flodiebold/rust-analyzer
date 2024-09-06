@@ -18,19 +18,19 @@ use cranelift::{
         isa::{CallConv, TargetIsa},
         settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
         FunctionBuilderContext, Imm64, InstBuilder, IntCC, MemFlags, Signature, StackSlotData,
-        Type, Value, Variable,
+        TrapCode, Type, Value, Variable,
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, FuncId, Module};
 use either::Either;
 use hir_def::{
-    layout::{Abi, Scalar},
-    CallableDefId, FunctionId, Lookup,
+    layout::{Abi, Scalar, TagEncoding},
+    CallableDefId, EnumVariantLoc, FunctionId, Lookup,
 };
 use hir_ty::{
     db::HirDatabase,
-    layout::{Layout, RustcEnumVariantIdx},
+    layout::{Layout, RustcEnumVariantIdx, Variants},
     mir::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind, UnOp,
@@ -382,13 +382,13 @@ impl<'a> FunctionTranslator<'a> {
                 };
                 // FIXME order of operations? first args or first func?
 
+                // handle tuple struct/enum constructor specially
                 if let Some((
                     abi,
                     id @ (CallableDefId::StructId(_) | CallableDefId::EnumVariantId(_)),
                     subst,
                 )) = static_func_id
                 {
-                    // handle tuple struct/enum constructor specially
                     assert_eq!(abi, FnAbi::Rust);
                     match id {
                         CallableDefId::StructId(s) => {
@@ -426,14 +426,7 @@ impl<'a> FunctionTranslator<'a> {
 
                 match static_func_id {
                     Some((FnAbi::RustIntrinsic, CallableDefId::FunctionId(func_id), subst)) => {
-                        self.translate_rust_intrinsic_call(
-                            func_id,
-                            subst,
-                            &args,
-                            destination,
-                            *target,
-                            *cleanup,
-                        );
+                        self.translate_rust_intrinsic_call(func_id, subst, &args, destination);
                     }
                     Some((_abi, CallableDefId::FunctionId(func_id), subst)) => {
                         let mono_func_id =
@@ -444,9 +437,6 @@ impl<'a> FunctionTranslator<'a> {
                         let call = self.builder.ins().call(func_ref, &args);
                         let results = self.builder.inst_results(call).to_vec();
                         self.store_func_call_return(&results, destination);
-                        if let Some(target) = target {
-                            self.builder.ins().jump(self.blocks[*target], &[]);
-                        }
                     }
                     None => {
                         let _func = self.translate_operand(func);
@@ -454,6 +444,12 @@ impl<'a> FunctionTranslator<'a> {
                     }
                     _ => unreachable!(),
                 }
+                if let Some(target) = target {
+                    self.builder.ins().jump(self.blocks[*target], &[]);
+                }
+            }
+            TerminatorKind::Unreachable => {
+                self.builder.ins().trap(TrapCode::UnreachableCodeReached);
             }
             _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
         }
@@ -617,10 +613,62 @@ impl<'a> FunctionTranslator<'a> {
                         let adt = variant_id.adt_id(self.db.upcast());
                         let ty = TyKind::Adt(chalk_ir::AdtId(adt), subst.clone()).intern(Interner);
                         let layout = self.ty_layout(ty.clone());
-                        let layout = match layout.variants {
+                        let layout = match &layout.variants {
                             hir_def::layout::Variants::Single { .. } => &layout,
-                            hir_def::layout::Variants::Multiple { .. } => {
-                                panic!("unsupported aggregate of enum")
+                            hir_def::layout::Variants::Multiple {
+                                tag,
+                                tag_encoding,
+                                tag_field,
+                                variants,
+                            } => {
+                                let hir_def::VariantId::EnumVariantId(enum_variant_id) =
+                                    *variant_id
+                                else {
+                                    panic!("multiple variants in non-enum")
+                                };
+                                let variant_idx =
+                                    enum_variant_id.lookup(self.db.upcast()).index as usize;
+                                let rustc_enum_variant_idx = RustcEnumVariantIdx(variant_idx);
+                                let discr_typ = translate_scalar_type(*tag, self.module.isa());
+                                // FIXME error handling
+                                let mut discriminant = self
+                                    .db
+                                    .const_eval_discriminant(enum_variant_id)
+                                    .expect("failed to eval enum discriminant");
+                                let have_tag = match tag_encoding {
+                                    TagEncoding::Direct => true,
+                                    TagEncoding::Niche {
+                                        untagged_variant,
+                                        niche_variants: _,
+                                        niche_start,
+                                    } => {
+                                        if *untagged_variant == rustc_enum_variant_idx {
+                                            false
+                                        } else {
+                                            discriminant = (variants
+                                                .iter_enumerated()
+                                                .filter(|(it, _)| it != untagged_variant)
+                                                .position(|(it, _)| it == rustc_enum_variant_idx)
+                                                .unwrap()
+                                                as i128)
+                                                .wrapping_add(*niche_start as i128);
+                                            true
+                                        }
+                                    }
+                                };
+                                if have_tag {
+                                    let field_offset = layout.fields.offset(*tag_field);
+                                    let discriminant = ValueKind::Primitive(
+                                        self.builder.ins().iconst(discr_typ, discriminant as i64),
+                                        false,
+                                    );
+                                    self.translate_place_store_with_offset(
+                                        place,
+                                        field_offset.bytes_usize() as i32,
+                                        discriminant,
+                                    );
+                                }
+                                &variants[rustc_enum_variant_idx]
                             }
                         };
                         match layout.abi {
@@ -644,13 +692,14 @@ impl<'a> FunctionTranslator<'a> {
                                     );
                                 }
                             }
-                            _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
+                            _ => panic!("adt with unsupported abi: {:?}", layout.abi),
                         };
                     }
                     _ => panic!("unsupported aggregate: {:?}", kind),
                 }
                 return;
             }
+            Rvalue::Discriminant(place) => self.translate_load_discriminant(place),
             _ => panic!("unsupported rvalue: {:?}", rvalue),
         };
         self.translate_place_store(place, value)
@@ -840,9 +889,30 @@ impl<'a> FunctionTranslator<'a> {
 
     fn translate_place_store_with_offset(&mut self, place: &Place, offset: i32, value: ValueKind) {
         match self.translate_place(place) {
-            PlaceKind::Variable(_var) => panic!("unsupported store with offset in variable"),
-            PlaceKind::VariablePair(_, _) => {
-                panic!("unsupported store with offset in variable pair")
+            PlaceKind::Variable(var) => {
+                if offset == 0 {
+                    match value {
+                        ValueKind::Primitive(val, _) => {
+                            self.builder.def_var(var, val);
+                        }
+                        _ => panic!("unsupported value kind for variable store: {:?}", value),
+                    }
+                } else {
+                    panic!("store with nonzero offset in variable");
+                }
+            }
+            PlaceKind::VariablePair(var1, var2) => {
+                if offset == 0 {
+                    match value {
+                        ValueKind::ScalarPair(val1, val2) => {
+                            self.builder.def_var(var1, val1);
+                            self.builder.def_var(var2, val2);
+                        }
+                        _ => panic!("unsupported value kind for variable pair store: {:?}", value),
+                    }
+                } else {
+                    panic!("store with nonzero offset in variable pair");
+                }
             }
             PlaceKind::Stack(dest, dest_offset) => match value {
                 ValueKind::Primitive(value, _) => {
@@ -1195,31 +1265,19 @@ impl<'a> FunctionTranslator<'a> {
         subst: Substitution,
         args: &[Value],
         destination: &Place,
-        target: Option<BasicBlockId>,
-        cleanup: Option<BasicBlockId>,
     ) {
         // FIXME might want to share more/less code with the normal rust call code
         let function_data = self.db.function_data(func_id);
         let func_name = function_data.name.as_str();
         match func_name {
-            "transmute" => self.translate_transmute(subst, args, destination, target, cleanup),
+            "transmute" => self.translate_transmute(subst, args, destination),
             _ => panic!("unsupported intrinsic: {:?}", func_name),
         }
     }
 
-    fn translate_transmute(
-        &mut self,
-        _subst: Substitution,
-        args: &[Value],
-        destination: &Place,
-        target: Option<BasicBlockId>,
-        _cleanup: Option<BasicBlockId>,
-    ) {
+    fn translate_transmute(&mut self, _subst: Substitution, args: &[Value], destination: &Place) {
         // FIXME check validity?
         self.store_func_call_return(args, destination);
-        if let Some(target) = target {
-            self.builder.ins().jump(self.blocks[target], &[]);
-        }
     }
 
     fn store_tuple(&mut self, tuple_ty: Ty, place: &Place, operands: &[Operand]) {
@@ -1250,6 +1308,57 @@ impl<'a> FunctionTranslator<'a> {
             }
             _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
         };
+    }
+
+    fn translate_load_discriminant(&mut self, place: &Place) -> ValueKind {
+        let (kind, ty) = self.translate_place_with_ty(place);
+        let &TyKind::Adt(chalk_ir::AdtId(hir_def::AdtId::EnumId(e)), _) = ty.kind(Interner) else {
+            panic!("load discriminant of non-enum")
+        };
+        let layout = self.ty_layout(ty.clone());
+        let Variants::Multiple { tag, tag_encoding, tag_field, .. } = &layout.variants else {
+            panic!("load discriminant of non-multi variant")
+        };
+        let tag_typ = translate_scalar_type(*tag, self.module.isa());
+        let tag_offset = layout.fields.offset(*tag_field).bytes_usize() as i32;
+        let tag = match kind {
+            PlaceKind::Variable(var) => {
+                assert!(tag_offset == 0);
+                self.builder.use_var(var)
+            }
+            PlaceKind::VariablePair(var1, _) => {
+                assert!(tag_offset == 0);
+                self.builder.use_var(var1)
+            }
+            PlaceKind::Stack(ss, off) => {
+                self.builder.ins().stack_load(tag_typ, ss, off + tag_offset)
+            }
+            PlaceKind::Mem(mem, off) => {
+                self.builder.ins().load(tag_typ, MemFlags::trusted(), mem, off + tag_offset)
+            }
+        };
+        let mut tag = match tag_encoding {
+            TagEncoding::Direct => tag,
+            TagEncoding::Niche { untagged_variant, niche_variants, niche_start } => {
+                let min_tag = niche_start;
+                let max_tag = niche_start
+                    .wrapping_add((niche_variants.end().0 - niche_variants.start().0) as u128);
+                let untagged_variant_discr = self
+                    .db
+                    .const_eval_discriminant(self.db.enum_data(e).variants[untagged_variant.0].0)
+                    .expect("failed to eval discriminant");
+                let untagged_variant_discr =
+                    self.builder.ins().iconst(tag_typ, untagged_variant_discr as i64);
+                let smaller =
+                    self.builder.ins().icmp_imm(IntCC::UnsignedLessThan, tag, *min_tag as i64);
+                let larger =
+                    self.builder.ins().icmp_imm(IntCC::UnsignedGreaterThan, tag, max_tag as i64);
+                let is_untagged = self.builder.ins().bor(smaller, larger);
+                self.builder.ins().select(is_untagged, untagged_variant_discr, tag)
+            }
+        };
+        tag = self.builder.ins().uextend(types::I128, tag);
+        ValueKind::Primitive(tag, false)
     }
 }
 

@@ -372,13 +372,27 @@ fn test() -> i32 {
 }
 
 #[test]
-fn test_struct() {
+fn test_struct_1() {
     check_i32(
         r#"
 struct S { a: i32, b: i32 }
 fn test() -> i32 {
     let s = S { a: 3, b: 2 };
     s.a + s.b
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_struct_2() {
+    check_i32(
+        r#"
+struct S { a: i32 }
+fn test() -> i32 {
+    let s = S { a: 5 };
+    s.a
 }
 "#,
         5,
