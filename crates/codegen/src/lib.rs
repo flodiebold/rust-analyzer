@@ -672,6 +672,11 @@ impl<'a> FunctionTranslator<'a> {
                             }
                         };
                         match layout.abi {
+                            Abi::Scalar(_) => {
+                                assert_eq!(operands.len(), 1);
+                                let val = self.translate_operand(&operands[0]);
+                                self.translate_place_store(place, val);
+                            }
                             Abi::ScalarPair(_, _) => {
                                 assert_eq!(operands.len(), 2);
                                 let val1 =
