@@ -164,7 +164,6 @@ impl Jit {
         };
 
         translator.create_blocks();
-        translator.compile_function_init();
 
         translator.compile_all_blocks();
 
@@ -317,7 +316,6 @@ impl<'a> FunctionTranslator<'a> {
     fn compile_function_init(&mut self) {
         let block = self.blocks[self.body.start_block];
         self.builder.append_block_params_for_function_params(block);
-        self.builder.switch_to_block(block);
         let mut param_values = self.builder.block_params(block).to_vec();
         param_values.reverse();
         for param in self.body.param_locals.iter().copied() {
@@ -327,13 +325,27 @@ impl<'a> FunctionTranslator<'a> {
                     self.builder.def_var(var1, param_values.pop().unwrap());
                     self.builder.def_var(var2, param_values.pop().unwrap());
                 }
-                LocalKind::Stack(_) => panic!("unsupported param on stack"),
+                LocalKind::Stack(ss) => {
+                    let ty = self.body.locals[param].ty.clone();
+                    let layout = self.ty_layout(ty);
+                    let size = layout.size.bytes_usize() as i32;
+                    self.translate_mem_copy(
+                        MemSlot::Stack(ss),
+                        0,
+                        MemSlot::MemAddr(param_values.pop().unwrap()),
+                        0,
+                        size,
+                    );
+                }
             }
         }
     }
 
     fn compile_mir_block(&mut self, block_id: BasicBlockId) {
         self.builder.switch_to_block(self.blocks[block_id]);
+        if self.body.start_block == block_id {
+            self.compile_function_init();
+        }
         let block = &self.body.basic_blocks[block_id];
         for stmt in &block.statements {
             self.translate_stmt(stmt);
@@ -1443,6 +1455,7 @@ fn translate_signature(
                         translate_scalar_type(sc2, isa),
                     ]),
                     Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => SmallVec::new(),
+                    Abi::Aggregate { sized: true } => SmallVec::from_buf([isa.pointer_type()]),
                     _ => panic!("unsupported abi in function param: {:?}", layout.abi),
                 }
             })
@@ -1458,7 +1471,8 @@ fn translate_signature(
                 translate_scalar_type(sc2, isa),
             ]),
             Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => SmallVec::new(),
-            _ => panic!("unsupported abi in function param: {:?}", layout.abi),
+            Abi::Aggregate { sized: true } => SmallVec::from_buf([isa.pointer_type()]),
+            _ => panic!("unsupported abi in function return: {:?}", layout.abi),
         }
         .into_iter()
         .map(AbiParam::new),

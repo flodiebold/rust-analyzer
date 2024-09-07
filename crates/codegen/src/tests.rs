@@ -599,3 +599,24 @@ fn test() -> i32 {
         5,
     )
 }
+
+#[test]
+fn test_option_niche() {
+    check_i32(
+        r#"
+enum Option<T> {
+    None,
+    Some(T),
+}
+fn test() -> i32 {
+    let n = 5;
+    let foo = Option::Some(&n);
+    match foo {
+        Option::Some(i) => *i,
+        Option::None => 0,
+    }
+}
+"#,
+        5,
+    )
+}
