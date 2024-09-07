@@ -1062,6 +1062,20 @@ impl<'a> FunctionTranslator<'a> {
                     .iconst(typ2, bytes_to_imm64(&bytes[typ1.bytes() as usize..]));
                 ValueKind::ScalarPair(val1, val2)
             }
+            Abi::Aggregate { sized: true } => {
+                let data = self
+                    .module
+                    .declare_anonymous_data(false, false)
+                    .expect("failed to create data");
+                let mut desc = DataDescription::new();
+                desc.define(bytes.clone());
+                self.module.define_data(data, &desc).expect("failed to define data");
+                let global = self.module.declare_data_in_func(data, &mut self.builder.func);
+                let ptr_type = self.module.isa().pointer_type();
+                let addr = self.builder.ins().global_value(ptr_type, global);
+                let size = layout.size.bytes_usize() as i32;
+                ValueKind::Aggregate { slot: MemSlot::MemAddr(addr), offset: 0, size }
+            }
             _ => panic!("unsupported abi for const: {:?}", layout.abi),
         };
         (val, ty)
