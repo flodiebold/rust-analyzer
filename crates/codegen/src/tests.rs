@@ -1,5 +1,5 @@
 use hir_def::db::DefDatabase;
-use hir_ty::{db::HirDatabase, Interner, Substitution};
+use hir_ty::{Interner, Substitution};
 use span::{Edition, EditionedFileId};
 use test_fixture::WithFixture;
 

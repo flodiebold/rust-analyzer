@@ -26,7 +26,7 @@ use cranelift_module::{DataDescription, FuncId, Module};
 use either::Either;
 use hir_def::{
     layout::{Abi, Scalar, TagEncoding},
-    CallableDefId, EnumVariantLoc, FunctionId, Lookup,
+    CallableDefId, FunctionId, Lookup, VariantId,
 };
 use hir_ty::{
     db::HirDatabase,
@@ -35,8 +35,7 @@ use hir_ty::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind, UnOp,
     },
-    AdtId, FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt,
-    TyKind,
+    AdtId, FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
@@ -396,11 +395,18 @@ impl<'a> FunctionTranslator<'a> {
                             self.store_tuple(ty, destination, &args);
                         }
                         CallableDefId::EnumVariantId(ev) => {
-                            let _ty_kind = TyKind::Adt(
+                            let ty = TyKind::Adt(
                                 AdtId(ev.lookup(self.db.upcast()).parent.into()),
                                 subst,
+                            )
+                            .intern(Interner);
+                            let layout = self.ty_layout(ty.clone());
+                            let layout = self.store_tag_and_get_variant_layout(
+                                VariantId::EnumVariantId(ev),
+                                &layout,
+                                destination,
                             );
-                            panic!("unsupported enum variant constructor")
+                            self.store_tuple_layout(layout, destination, &args);
                         }
                         _ => unreachable!(),
                     };
@@ -613,64 +619,8 @@ impl<'a> FunctionTranslator<'a> {
                         let adt = variant_id.adt_id(self.db.upcast());
                         let ty = TyKind::Adt(chalk_ir::AdtId(adt), subst.clone()).intern(Interner);
                         let layout = self.ty_layout(ty.clone());
-                        let layout = match &layout.variants {
-                            hir_def::layout::Variants::Single { .. } => &layout,
-                            hir_def::layout::Variants::Multiple {
-                                tag,
-                                tag_encoding,
-                                tag_field,
-                                variants,
-                            } => {
-                                let hir_def::VariantId::EnumVariantId(enum_variant_id) =
-                                    *variant_id
-                                else {
-                                    panic!("multiple variants in non-enum")
-                                };
-                                let variant_idx =
-                                    enum_variant_id.lookup(self.db.upcast()).index as usize;
-                                let rustc_enum_variant_idx = RustcEnumVariantIdx(variant_idx);
-                                let discr_typ = translate_scalar_type(*tag, self.module.isa());
-                                // FIXME error handling
-                                let mut discriminant = self
-                                    .db
-                                    .const_eval_discriminant(enum_variant_id)
-                                    .expect("failed to eval enum discriminant");
-                                let have_tag = match tag_encoding {
-                                    TagEncoding::Direct => true,
-                                    TagEncoding::Niche {
-                                        untagged_variant,
-                                        niche_variants: _,
-                                        niche_start,
-                                    } => {
-                                        if *untagged_variant == rustc_enum_variant_idx {
-                                            false
-                                        } else {
-                                            discriminant = (variants
-                                                .iter_enumerated()
-                                                .filter(|(it, _)| it != untagged_variant)
-                                                .position(|(it, _)| it == rustc_enum_variant_idx)
-                                                .unwrap()
-                                                as i128)
-                                                .wrapping_add(*niche_start as i128);
-                                            true
-                                        }
-                                    }
-                                };
-                                if have_tag {
-                                    let field_offset = layout.fields.offset(*tag_field);
-                                    let discriminant = ValueKind::Primitive(
-                                        self.builder.ins().iconst(discr_typ, discriminant as i64),
-                                        false,
-                                    );
-                                    self.translate_place_store_with_offset(
-                                        place,
-                                        field_offset.bytes_usize() as i32,
-                                        discriminant,
-                                    );
-                                }
-                                &variants[rustc_enum_variant_idx]
-                            }
-                        };
+                        let layout =
+                            self.store_tag_and_get_variant_layout(*variant_id, &layout, place);
                         match layout.abi {
                             Abi::Scalar(_) => {
                                 assert_eq!(operands.len(), 1);
@@ -799,21 +749,19 @@ impl<'a> FunctionTranslator<'a> {
                     ty = self.db.field_types(field_id.parent)[field_id.local_id]
                         .clone()
                         .substitute(Interner, subst);
+                    let offset = layout.fields.offset(idx).bytes_usize();
                     match kind {
                         PlaceKind::Variable(var) => {
-                            assert_eq!(0, idx);
+                            assert_eq!(0, offset);
                             kind = PlaceKind::Variable(var);
                         }
                         PlaceKind::VariablePair(var1, var2) => {
-                            assert!(idx < 2);
-                            kind = PlaceKind::Variable(if idx == 0 { var1 } else { var2 });
+                            kind = PlaceKind::Variable(if offset == 0 { var1 } else { var2 });
                         }
                         PlaceKind::Stack(ss, off) => {
-                            let offset = layout.fields.offset(idx).bytes_usize();
                             kind = PlaceKind::Stack(ss, off + offset as i32);
                         }
                         PlaceKind::Mem(addr, off) => {
-                            let offset = layout.fields.offset(idx).bytes_usize();
                             kind = PlaceKind::Mem(addr, off + offset as i32);
                         }
                     }
@@ -913,10 +861,13 @@ impl<'a> FunctionTranslator<'a> {
                             self.builder.def_var(var1, val1);
                             self.builder.def_var(var2, val2);
                         }
+                        ValueKind::Primitive(val, _) => {
+                            self.builder.def_var(var1, val);
+                        }
                         _ => panic!("unsupported value kind for variable pair store: {:?}", value),
                     }
                 } else {
-                    panic!("store with nonzero offset in variable pair");
+                    self.builder.def_var(var2, value.assert_primitive().0);
                 }
             }
             PlaceKind::Stack(dest, dest_offset) => match value {
@@ -1287,19 +1238,30 @@ impl<'a> FunctionTranslator<'a> {
 
     fn store_tuple(&mut self, tuple_ty: Ty, place: &Place, operands: &[Operand]) {
         let layout = self.ty_layout(tuple_ty.clone());
+        self.store_tuple_layout(&layout, place, operands);
+    }
+
+    fn store_tuple_layout(&mut self, layout: &Layout, place: &Place, operands: &[Operand]) {
         match layout.abi {
             Abi::Scalar(_) => {
                 assert_eq!(operands.len(), 1);
                 let val = self.translate_operand(&operands[0]);
                 self.translate_place_store(place, val);
             }
-            Abi::ScalarPair(_, _) => {
-                assert_eq!(operands.len(), 2);
-                let val1 = self.translate_operand(&operands[0]).assert_primitive().0;
-                let val2 = self.translate_operand(&operands[1]).assert_primitive().0;
-                let val = ValueKind::ScalarPair(val1, val2);
-                self.translate_place_store(place, val);
-            }
+            Abi::ScalarPair(_, _) => match operands {
+                [op1, op2] => {
+                    let val1 = self.translate_operand(op1).assert_primitive().0;
+                    let val2 = self.translate_operand(op2).assert_primitive().0;
+                    let val = ValueKind::ScalarPair(val1, val2);
+                    self.translate_place_store(place, val);
+                }
+                [op] => {
+                    let val = self.translate_operand(op);
+                    let field_offset = layout.fields.offset(0).bytes_usize();
+                    self.translate_place_store_with_offset(place, field_offset as i32, val);
+                }
+                _ => panic!("storing {} operands in scalar pair", operands.len()),
+            },
             Abi::Aggregate { sized: true } => {
                 for (i, op) in operands.iter().enumerate() {
                     let val = self.translate_operand(op);
@@ -1364,6 +1326,59 @@ impl<'a> FunctionTranslator<'a> {
         };
         tag = self.builder.ins().uextend(types::I128, tag);
         ValueKind::Primitive(tag, false)
+    }
+
+    fn store_tag_and_get_variant_layout<'b>(
+        &mut self,
+        variant_id: VariantId,
+        layout: &'b Layout,
+        place: &Place,
+    ) -> &'b Layout {
+        match &layout.variants {
+            hir_def::layout::Variants::Single { .. } => &layout,
+            hir_def::layout::Variants::Multiple { tag, tag_encoding, tag_field, variants } => {
+                let hir_def::VariantId::EnumVariantId(enum_variant_id) = variant_id else {
+                    panic!("multiple variants in non-enum")
+                };
+                let variant_idx = enum_variant_id.lookup(self.db.upcast()).index as usize;
+                let rustc_enum_variant_idx = RustcEnumVariantIdx(variant_idx);
+                let discr_typ = translate_scalar_type(*tag, self.module.isa());
+                // FIXME error handling
+                let mut discriminant = self
+                    .db
+                    .const_eval_discriminant(enum_variant_id)
+                    .expect("failed to eval enum discriminant");
+                let have_tag = match tag_encoding {
+                    TagEncoding::Direct => true,
+                    TagEncoding::Niche { untagged_variant, niche_variants: _, niche_start } => {
+                        if *untagged_variant == rustc_enum_variant_idx {
+                            false
+                        } else {
+                            discriminant = (variants
+                                .iter_enumerated()
+                                .filter(|(it, _)| it != untagged_variant)
+                                .position(|(it, _)| it == rustc_enum_variant_idx)
+                                .unwrap() as i128)
+                                .wrapping_add(*niche_start as i128);
+                            true
+                        }
+                    }
+                };
+                if have_tag {
+                    let field_offset = layout.fields.offset(*tag_field);
+                    let discriminant = ValueKind::Primitive(
+                        self.builder.ins().iconst(discr_typ, discriminant as i64),
+                        false,
+                    );
+                    self.translate_place_store_with_offset(
+                        place,
+                        field_offset.bytes_usize() as i32,
+                        discriminant,
+                    );
+                }
+                &variants[rustc_enum_variant_idx]
+            }
+        }
     }
 }
 
