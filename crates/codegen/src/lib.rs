@@ -26,7 +26,7 @@ use cranelift_module::{DataDescription, FuncId, Module};
 use either::Either;
 use hir_def::{
     layout::{Abi, Scalar, TagEncoding},
-    CallableDefId, FunctionId, Lookup, VariantId,
+    CallableDefId, FunctionId, LocalFieldId, Lookup, VariantId,
 };
 use hir_ty::{
     db::HirDatabase,
@@ -403,22 +403,36 @@ impl<'a> FunctionTranslator<'a> {
                     assert_eq!(abi, FnAbi::Rust);
                     match id {
                         CallableDefId::StructId(s) => {
-                            let ty = TyKind::Adt(AdtId(s.into()), subst).intern(Interner);
-                            self.store_tuple(ty, destination, &args);
+                            let ty = TyKind::Adt(AdtId(s.into()), subst.clone()).intern(Interner);
+                            let layout = self.ty_layout(ty.clone());
+                            let tys: Vec<_> = self
+                                .db
+                                .field_types(VariantId::StructId(s))
+                                .iter()
+                                .map(|(_, t)| t.clone().substitute(Interner, &subst))
+                                .collect();
+                            self.store_tuple_layout(&layout, &tys, destination, &args);
                         }
                         CallableDefId::EnumVariantId(ev) => {
                             let ty = TyKind::Adt(
                                 AdtId(ev.lookup(self.db.upcast()).parent.into()),
-                                subst,
+                                subst.clone(),
                             )
                             .intern(Interner);
                             let layout = self.ty_layout(ty.clone());
+                            let variant_id = VariantId::EnumVariantId(ev);
                             let layout = self.store_tag_and_get_variant_layout(
-                                VariantId::EnumVariantId(ev),
+                                variant_id,
                                 &layout,
                                 destination,
                             );
-                            self.store_tuple_layout(layout, destination, &args);
+                            let tys: Vec<_> = self
+                                .db
+                                .field_types(variant_id)
+                                .iter()
+                                .map(|(_, t)| t.clone().substitute(Interner, &subst))
+                                .collect();
+                            self.store_tuple_layout(layout, &tys, destination, &args);
                         }
                         _ => unreachable!(),
                     };
@@ -484,7 +498,7 @@ impl<'a> FunctionTranslator<'a> {
 
     fn store_func_call_return(&mut self, results: &[Value], destination: &Place) {
         let (dest, ret_ty) = self.translate_place_with_ty(destination);
-        let ret_ty_layout = self.ty_layout(ret_ty);
+        let ret_ty_layout = self.ty_layout(ret_ty.clone());
         if results.len() > 0 {
             let ret_val = match ret_ty_layout.abi {
                 Abi::Uninhabited => panic!("uninhabited return"),
@@ -499,7 +513,7 @@ impl<'a> FunctionTranslator<'a> {
                 Abi::Vector { .. } => panic!("unsupported vector return"),
                 Abi::Aggregate { .. } => panic!("unsupported aggregate return"),
             };
-            self.translate_place_kind_store(dest, ret_val);
+            self.translate_place_kind_store(dest, ret_ty, ret_val);
         }
     }
 
@@ -629,6 +643,7 @@ impl<'a> FunctionTranslator<'a> {
                             let val = self.translate_operand(op);
                             self.translate_place_store_with_offset(
                                 place,
+                                elem_ty.clone(),
                                 i as i32 * layout.size.bytes_usize() as i32,
                                 val,
                             );
@@ -643,34 +658,20 @@ impl<'a> FunctionTranslator<'a> {
                         let layout = self.ty_layout(ty.clone());
                         let layout =
                             self.store_tag_and_get_variant_layout(*variant_id, &layout, place);
-                        match layout.abi {
-                            Abi::Scalar(_) => {
-                                assert_eq!(operands.len(), 1);
-                                let val = self.translate_operand(&operands[0]);
-                                self.translate_place_store(place, val);
-                            }
-                            Abi::ScalarPair(_, _) => {
-                                assert_eq!(operands.len(), 2);
-                                let val1 =
-                                    self.translate_operand(&operands[0]).assert_primitive().0;
-                                let val2 =
-                                    self.translate_operand(&operands[1]).assert_primitive().0;
-                                let val = ValueKind::ScalarPair(val1, val2);
-                                self.translate_place_store(place, val);
-                            }
-                            Abi::Aggregate { sized: true } => {
-                                for (i, op) in operands.iter().enumerate() {
-                                    let val = self.translate_operand(op);
-                                    let field_offset = layout.fields.offset(i);
-                                    self.translate_place_store_with_offset(
-                                        place,
-                                        field_offset.bytes_usize() as i32,
-                                        val,
-                                    );
-                                }
-                            }
-                            _ => panic!("adt with unsupported abi: {:?}", layout.abi),
-                        };
+                        let field_types = self.db.field_types(*variant_id);
+                        for (i, op) in operands.iter().enumerate() {
+                            let val = self.translate_operand(op);
+                            let field_offset = layout.fields.offset(i);
+                            let field_ty = field_types[LocalFieldId::from_raw((i as u32).into())]
+                                .clone()
+                                .substitute(Interner, subst);
+                            self.translate_place_store_with_offset(
+                                place,
+                                field_ty,
+                                field_offset.bytes_usize() as i32,
+                                val,
+                            );
+                        }
                     }
                     Union(_, _) => panic!("unsupported union aggregate"),
                     Closure(_) => panic!("unsupported closure aggregate"),
@@ -824,22 +825,29 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
     fn translate_place_store(&mut self, place: &Place, value: ValueKind) {
-        let kind = self.translate_place(place);
-        self.translate_place_kind_store_with_offset(kind, 0, value)
+        let (kind, ty) = self.translate_place_with_ty(place);
+        self.translate_place_kind_store_with_offset(kind, ty, 0, value)
     }
 
-    fn translate_place_kind_store(&mut self, kind: PlaceKind, value: ValueKind) {
-        self.translate_place_kind_store_with_offset(kind, 0, value)
+    fn translate_place_kind_store(&mut self, kind: PlaceKind, ty: Ty, value: ValueKind) {
+        self.translate_place_kind_store_with_offset(kind, ty, 0, value)
     }
 
-    fn translate_place_store_with_offset(&mut self, place: &Place, offset: i32, value: ValueKind) {
+    fn translate_place_store_with_offset(
+        &mut self,
+        place: &Place,
+        ty: Ty,
+        offset: i32,
+        value: ValueKind,
+    ) {
         let kind = self.translate_place(place);
-        self.translate_place_kind_store_with_offset(kind, offset, value)
+        self.translate_place_kind_store_with_offset(kind, ty, offset, value)
     }
 
     fn translate_place_kind_store_with_offset(
         &mut self,
         kind: PlaceKind,
+        ty: Ty,
         offset: i32,
         value: ValueKind,
     ) {
@@ -876,8 +884,12 @@ impl<'a> FunctionTranslator<'a> {
                 ValueKind::Primitive(value, _) => {
                     self.builder.ins().stack_store(value, dest, offset + dest_offset);
                 }
-                ValueKind::ScalarPair(_val1, _val2) => {
-                    panic!("unsupported stack store of scalar pair")
+                ValueKind::ScalarPair(val1, val2) => {
+                    let layout = self.ty_layout(ty);
+                    let off1 = layout.fields.offset(0).bytes_usize() as i32;
+                    let off2 = layout.fields.offset(1).bytes_usize() as i32;
+                    self.builder.ins().stack_store(val1, dest, offset + dest_offset + off1);
+                    self.builder.ins().stack_store(val2, dest, offset + dest_offset + off2);
                 }
                 ValueKind::Aggregate { slot, offset: src_offset, size } => {
                     let dest = MemSlot::Stack(dest);
@@ -1236,43 +1248,32 @@ impl<'a> FunctionTranslator<'a> {
 
     fn store_tuple(&mut self, tuple_ty: Ty, place: &Place, operands: &[Operand]) {
         let layout = self.ty_layout(tuple_ty.clone());
-        self.store_tuple_layout(&layout, place, operands);
+        let tys: Vec<_> = tuple_ty
+            .as_tuple()
+            .expect("no tuple")
+            .iter(Interner)
+            .map(|g| g.assert_ty_ref(Interner).clone())
+            .collect();
+        self.store_tuple_layout(&layout, &tys, place, operands);
     }
 
-    fn store_tuple_layout(&mut self, layout: &Layout, place: &Place, operands: &[Operand]) {
-        match layout.abi {
-            Abi::Scalar(_) => {
-                assert_eq!(operands.len(), 1);
-                let val = self.translate_operand(&operands[0]);
-                self.translate_place_store(place, val);
-            }
-            Abi::ScalarPair(_, _) => match operands {
-                [op1, op2] => {
-                    let val1 = self.translate_operand(op1).assert_primitive().0;
-                    let val2 = self.translate_operand(op2).assert_primitive().0;
-                    let val = ValueKind::ScalarPair(val1, val2);
-                    self.translate_place_store(place, val);
-                }
-                [op] => {
-                    let val = self.translate_operand(op);
-                    let field_offset = layout.fields.offset(0).bytes_usize();
-                    self.translate_place_store_with_offset(place, field_offset as i32, val);
-                }
-                _ => panic!("storing {} operands in scalar pair", operands.len()),
-            },
-            Abi::Aggregate { sized: true } => {
-                for (i, op) in operands.iter().enumerate() {
-                    let val = self.translate_operand(op);
-                    let field_offset = layout.fields.offset(i);
-                    self.translate_place_store_with_offset(
-                        place,
-                        field_offset.bytes_usize() as i32,
-                        val,
-                    );
-                }
-            }
-            _ => unreachable!("tuple with bad abi: {:?}", layout.abi),
-        };
+    fn store_tuple_layout(
+        &mut self,
+        layout: &Layout,
+        tys: &[Ty],
+        place: &Place,
+        operands: &[Operand],
+    ) {
+        for (i, op) in operands.iter().enumerate() {
+            let val = self.translate_operand(op);
+            let field_offset = layout.fields.offset(i);
+            self.translate_place_store_with_offset(
+                place,
+                tys[i].clone(),
+                field_offset.bytes_usize() as i32,
+                val,
+            );
+        }
     }
 
     fn translate_load_discriminant(&mut self, place: &Place) -> ValueKind {
@@ -1370,6 +1371,9 @@ impl<'a> FunctionTranslator<'a> {
                     );
                     self.translate_place_store_with_offset(
                         place,
+                        // HACK the type doesn't really matter here
+                        TyKind::Scalar(hir_ty::Scalar::Uint(chalk_ir::UintTy::U128))
+                            .intern(Interner),
                         field_offset.bytes_usize() as i32,
                         discriminant,
                     );
