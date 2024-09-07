@@ -38,7 +38,7 @@ use hir_ty::{
     AdtId, FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::InternValueTrivial;
 use smallvec::SmallVec;
 use triomphe::Arc;
@@ -161,6 +161,7 @@ impl Jit {
             shims: &mut self.shims,
             env,
             engine: jit_engine,
+            referenced_locals: find_referenced_locals(&body),
         };
 
         translator.create_blocks();
@@ -210,6 +211,7 @@ struct FunctionTranslator<'a> {
     shims: &'a mut FxHashMap<MonoFunctionId, FuncId>,
     env: Arc<TraitEnvironment>,
     engine: &'a JitEngine<'a>,
+    referenced_locals: FxHashSet<LocalId>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -533,6 +535,7 @@ impl<'a> FunctionTranslator<'a> {
                 ValueKind::Primitive(val, _) => [val].to_vec(),
                 ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
                 ValueKind::Aggregate { slot, offset, size: _ } => {
+                    // FIXME: is this correct ABI-wise?
                     let addr = self.translate_mem_slot_addr(slot, offset);
                     [addr].to_vec()
                 }
@@ -568,12 +571,6 @@ impl<'a> FunctionTranslator<'a> {
                 let projection = place.projection.lookup(&self.body.projection_store);
                 let typ = self.module.isa().pointer_type();
                 match projection {
-                    [] => {
-                        // FIXME spilling on demand like this won't work properly, I think?
-                        let stack_slot = self.spill_to_stack(place.local);
-                        let addr = self.builder.ins().stack_addr(typ, stack_slot, 0);
-                        ValueKind::Primitive(addr, false)
-                    }
                     [rest @ .., ProjectionElem::Deref] => {
                         self.translate_copy_local_with_projection(place.local, rest).0
                     }
@@ -948,7 +945,20 @@ impl<'a> FunctionTranslator<'a> {
                 .db
                 .layout_of_ty(typ.clone(), self.env.clone())
                 .expect("failed to lay out type");
-            if let Abi::Scalar(scalar) = layout.abi {
+            let needs_stack = self.referenced_locals.contains(&local)
+                || matches!(layout.abi, Abi::Aggregate { .. });
+            if needs_stack {
+                if !layout.is_sized() {
+                    panic!("unsized type in local");
+                }
+                let size = layout.size.bytes_usize();
+                let slot = self.builder.create_sized_stack_slot(StackSlotData {
+                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
+                    size: size as u32,
+                    align_shift: layout.align.pref.bytes().ilog2() as u8,
+                });
+                LocalKind::Stack(slot)
+            } else if let Abi::Scalar(scalar) = layout.abi {
                 let var = Variable::new(local.into_raw().into_u32() as usize * 2);
                 let typ = translate_scalar_type(scalar, self.module.isa());
                 self.builder.declare_var(var, typ);
@@ -962,45 +972,10 @@ impl<'a> FunctionTranslator<'a> {
                 self.builder.declare_var(var2, typ2);
                 LocalKind::VariablePair(var1, var2)
             } else {
-                if !layout.is_sized() {
-                    panic!("unsized type in local");
-                }
-                let size = layout.size.bytes_usize();
-                let slot = self.builder.create_sized_stack_slot(StackSlotData {
-                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
-                    size: size as u32,
-                    align_shift: layout.align.pref.bytes().ilog2() as u8,
-                });
-                LocalKind::Stack(slot)
+                panic!("unsupported layout for local: {:?}", layout.abi);
             }
         });
         variable
-    }
-
-    fn spill_to_stack(&mut self, local: LocalId) -> StackSlot {
-        let current = self.get_variable(local);
-        match current {
-            LocalKind::Variable(var) => {
-                let typ = self.body.locals[local].ty.clone();
-                let layout = self
-                    .db
-                    .layout_of_ty(typ.clone(), self.env.clone())
-                    .expect("failed to lay out type");
-                let slot = self.builder.create_sized_stack_slot(StackSlotData {
-                    kind: codegen::ir::StackSlotKind::ExplicitSlot,
-                    size: layout.size.bytes_usize() as u32,
-                    align_shift: layout.align.pref.bytes().ilog2() as u8,
-                });
-                let val = self.builder.use_var(var);
-                self.builder.ins().stack_store(val, slot, 0);
-                self.variables[local] = LocalKind::Stack(slot);
-                slot
-            }
-            LocalKind::VariablePair(_var1, _var2) => {
-                panic!("unsupported stack spill of variable pair")
-            }
-            LocalKind::Stack(slot) => slot,
-        }
     }
 
     fn translate_operand(&mut self, operand: &Operand) -> ValueKind {
@@ -1406,6 +1381,47 @@ impl<'a> FunctionTranslator<'a> {
             }
         }
     }
+}
+
+/// Walks the full MIR body to find locals that are referenced, meaning that
+/// they need to be stored on the stack.
+fn find_referenced_locals(body: &MirBody) -> FxHashSet<LocalId> {
+    let mut found = FxHashSet::default();
+    for (_, block) in body.basic_blocks.iter() {
+        for stmt in &block.statements {
+            if let StatementKind::Assign(_, rv) = &stmt.kind {
+                if let Rvalue::Ref(_, pl) = rv {
+                    let local = get_direct_local(pl, &body.projection_store);
+                    if let Some(local) = local {
+                        found.insert(local);
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_direct_local(
+        pl: &hir_ty::mir::Place,
+        projection_store: &hir_ty::mir::ProjectionStore,
+    ) -> Option<LocalId> {
+        let mut local = Some(pl.local);
+        for elem in pl.projection.lookup(projection_store) {
+            match elem {
+                ProjectionElem::Deref => {
+                    local = None;
+                }
+                ProjectionElem::Field(_)
+                | ProjectionElem::ClosureField(_)
+                | ProjectionElem::Index(_)
+                | ProjectionElem::ConstantIndex { .. }
+                | ProjectionElem::Subslice { .. }
+                | ProjectionElem::OpaqueCast(_) => {}
+            }
+        }
+        local
+    }
+
+    found
 }
 
 fn bytes_to_imm64(bytes: &[u8]) -> Imm64 {

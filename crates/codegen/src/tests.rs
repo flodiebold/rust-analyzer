@@ -22,7 +22,10 @@ fn eval_fn_i32(db: &TestDB, file_id: EditionedFileId) -> Result<i32, String> {
             _ => None,
         })
         .expect("no test function found");
-    let mono_func_id = db.intern_mono_function(crate::MonoFunction { func: func_id, subst: Substitution::empty(Interner) });
+    let mono_func_id = db.intern_mono_function(crate::MonoFunction {
+        func: func_id,
+        subst: Substitution::empty(Interner),
+    });
 
     let engine = JitEngine::new(db);
     let code = engine.jit.lock().unwrap().compile(db, mono_func_id, &engine).unwrap();
@@ -189,7 +192,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_mut_ref_in_loop() {
     check_i32(
         r#"
