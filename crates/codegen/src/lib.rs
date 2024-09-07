@@ -510,8 +510,15 @@ impl<'a> FunctionTranslator<'a> {
                     assert_eq!(results.len(), 2);
                     ValueKind::ScalarPair(results[0], results[1])
                 }
+                Abi::Aggregate { sized } => {
+                    if !sized {
+                        panic!("unsupported unsized return")
+                    }
+                    assert_eq!(results.len(), 1);
+                    let size = ret_ty_layout.size.bytes_usize() as i32;
+                    ValueKind::Aggregate { slot: MemSlot::MemAddr(results[0]), offset: 0, size }
+                }
                 Abi::Vector { .. } => panic!("unsupported vector return"),
-                Abi::Aggregate { .. } => panic!("unsupported aggregate return"),
             };
             self.translate_place_kind_store(dest, ret_ty, ret_val);
         }
@@ -525,7 +532,10 @@ impl<'a> FunctionTranslator<'a> {
             _ => match self.translate_copy_local_with_projection(return_slot(), &[]).0 {
                 ValueKind::Primitive(val, _) => [val].to_vec(),
                 ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
-                ValueKind::Aggregate { .. } => panic!("unsupported aggregate return"),
+                ValueKind::Aggregate { slot, offset, size: _ } => {
+                    let addr = self.translate_mem_slot_addr(slot, offset);
+                    [addr].to_vec()
+                }
             },
         };
         self.builder.ins().return_(&returns);
