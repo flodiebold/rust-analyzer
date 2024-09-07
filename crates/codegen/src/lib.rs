@@ -12,7 +12,10 @@ use std::{
 use anyhow::{anyhow, Context};
 use base_db::{impl_intern_key, salsa::InternKey, Upcast};
 use cranelift::{
-    codegen::{self, ir::StackSlot},
+    codegen::{
+        self,
+        ir::{GlobalValue, StackSlot},
+    },
     frontend::Switch,
     prelude::{
         isa::{CallConv, TargetIsa},
@@ -22,11 +25,11 @@ use cranelift::{
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, FuncId, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Module};
 use either::Either;
 use hir_def::{
     layout::{Abi, Scalar, TagEncoding},
-    CallableDefId, FunctionId, LocalFieldId, Lookup, VariantId,
+    CallableDefId, FunctionId, LocalFieldId, Lookup, StaticId, VariantId,
 };
 use hir_ty::{
     db::HirDatabase,
@@ -86,6 +89,7 @@ pub struct Jit {
 
     compiled_functions: FxHashMap<MonoFunctionId, FuncId>,
     shims: FxHashMap<MonoFunctionId, FuncId>,
+    statics: FxHashMap<StaticId, DataId>,
 }
 
 // FIXME: cleanup of Jit (needs to call free_memory())
@@ -110,6 +114,7 @@ impl Default for Jit {
             module,
             compiled_functions: FxHashMap::default(),
             shims: FxHashMap::default(),
+            statics: FxHashMap::default(),
         }
     }
 }
@@ -159,6 +164,7 @@ impl Jit {
             builder,
             module: &mut self.module,
             shims: &mut self.shims,
+            statics: &mut self.statics,
             env,
             engine: jit_engine,
             referenced_locals: find_referenced_locals(&body),
@@ -209,6 +215,7 @@ struct FunctionTranslator<'a> {
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
     shims: &'a mut FxHashMap<MonoFunctionId, FuncId>,
+    statics: &'a mut FxHashMap<StaticId, DataId>,
     env: Arc<TraitEnvironment>,
     engine: &'a JitEngine<'a>,
     referenced_locals: FxHashSet<LocalId>,
@@ -300,6 +307,36 @@ impl<'a> FunctionTranslator<'a> {
         // FIXME can this legitimately fail?
         self.module.define_function(id, &mut ctx).expect("failed to compile shim function");
         id
+    }
+
+    fn get_static(&mut self, static_id: StaticId) -> (GlobalValue, Ty) {
+        let static_data = self.db.static_data(static_id);
+        let data = self.db.const_eval_static(static_id).expect("failed to eval static");
+        let ty = data.interned().ty.clone();
+        let data_id = self.statics.entry(static_id).or_insert_with(|| {
+            let mut desc = DataDescription::new();
+            let data_id = self
+                .module
+                .declare_anonymous_data(static_data.mutable, false)
+                .expect("failed to declare static data");
+            let chalk_ir::ConstValue::Concrete(c) = &data.interned().value else {
+                panic!("evaluating gave non concrete constant for static");
+            };
+            let hir_ty::ConstScalar::Bytes(bytes, mm) = &c.interned else {
+                panic!("bad const: {:?}", c.interned)
+            };
+            match mm {
+                MemoryMap::Empty => {}
+                MemoryMap::Simple(_) | MemoryMap::Complex(_) => {
+                    panic!("unsupported static with memory map");
+                }
+            };
+            desc.define(bytes.clone());
+            self.module.define_data(data_id, &desc).expect("failed to define static data");
+            data_id
+        });
+        let global_value = self.module.declare_data_in_func(*data_id, &mut self.builder.func);
+        (global_value, ty)
     }
 
     fn create_blocks(&mut self) {
@@ -993,7 +1030,13 @@ impl<'a> FunctionTranslator<'a> {
         match operand {
             Operand::Constant(konst) => self.translate_const(konst),
             Operand::Copy(place) | Operand::Move(place) => self.translate_place_copy(place),
-            Operand::Static(_static_id) => panic!("unsupported static"),
+            Operand::Static(static_id) => {
+                let (global_value, ty) = self.get_static(*static_id);
+                let addr =
+                    self.builder.ins().global_value(self.module.isa().pointer_type(), global_value);
+                let ptr_ty = TyKind::Raw(hir_ty::Mutability::Mut, ty).intern(Interner);
+                (ValueKind::Primitive(addr, false), ptr_ty)
+            }
         }
     }
 
@@ -1101,41 +1144,54 @@ impl<'a> FunctionTranslator<'a> {
                 assert!(matches!(abi, Abi::ScalarPair(..)));
                 ValueKind::ScalarPair(var1_val, var2_val)
             }
-            PlaceKind::Stack(slot, off) => match abi {
+            PlaceKind::Stack(slot, off) => {
+                self.translate_mem_slot_load(MemSlot::Stack(slot), off, ty.clone())
+            }
+            PlaceKind::Mem(addr, off) => {
+                self.translate_mem_slot_load(MemSlot::MemAddr(addr), off, ty.clone())
+            }
+        };
+        (val, ty)
+    }
+
+    fn translate_mem_slot_load(&mut self, mem_slot: MemSlot, offset: i32, ty: Ty) -> ValueKind {
+        let layout = self.ty_layout(ty);
+        let abi = layout.abi;
+        match mem_slot {
+            MemSlot::Stack(slot) => match abi {
                 Abi::Scalar(scalar) => {
                     let loaded_val = self.builder.ins().stack_load(
                         translate_scalar_type(scalar, self.module.isa()),
                         slot,
-                        off,
+                        offset,
                     );
                     ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
                 }
                 Abi::Aggregate { sized: true } => ValueKind::Aggregate {
                     slot: MemSlot::Stack(slot),
-                    offset: off,
+                    offset,
                     size: layout.size.bytes_usize() as i32,
                 },
                 _ => panic!("unsupported abi for var copy from stack: {:?}", abi),
             },
-            PlaceKind::Mem(addr, off) => match abi {
+            MemSlot::MemAddr(addr) => match abi {
                 Abi::Scalar(scalar) => {
                     let loaded_val = self.builder.ins().load(
                         translate_scalar_type(scalar, self.module.isa()),
                         MemFlags::trusted(),
                         addr,
-                        off,
+                        offset,
                     );
                     ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
                 }
                 Abi::Aggregate { sized: true } => ValueKind::Aggregate {
                     slot: MemSlot::MemAddr(addr),
-                    offset: off,
+                    offset,
                     size: layout.size.bytes_usize() as i32,
                 },
                 _ => panic!("unsupported abi for var copy from mem: {:?}", abi),
             },
-        };
-        (val, ty)
+        }
     }
 
     fn translate_checked_binop(
