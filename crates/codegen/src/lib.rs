@@ -469,7 +469,16 @@ impl<'a> FunctionTranslator<'a> {
             TerminatorKind::Unreachable => {
                 self.builder.ins().trap(TrapCode::UnreachableCodeReached);
             }
-            _ => panic!("unsupported terminator kind: {:?}", terminator.kind),
+            TerminatorKind::UnwindResume => panic!("unsupported unwind"),
+            TerminatorKind::Abort => panic!("unsupported abort"),
+            TerminatorKind::Assert { .. } => panic!("unsupported assert"),
+            TerminatorKind::Yield { .. } => panic!("unsupported yield"),
+            TerminatorKind::CoroutineDrop => panic!("unsupported coroutine drop"),
+            TerminatorKind::DropAndReplace { .. }
+            | TerminatorKind::FalseEdge { .. }
+            | TerminatorKind::FalseUnwind { .. } => {
+                panic!("encountered disallowed terminator: {:?}", terminator.kind)
+            }
         }
     }
 
@@ -607,6 +616,7 @@ impl<'a> FunctionTranslator<'a> {
                             _ => panic!("unsupported unsize from {:?} to {:?}", from_ty, to_ty),
                         }
                     }
+
                     _ => panic!("unsupported cast: {:?} {:?} {:?}", kind, from_ty, to_ty),
                 }
             }
@@ -662,12 +672,17 @@ impl<'a> FunctionTranslator<'a> {
                             _ => panic!("adt with unsupported abi: {:?}", layout.abi),
                         };
                     }
-                    _ => panic!("unsupported aggregate: {:?}", kind),
+                    Union(_, _) => panic!("unsupported union aggregate"),
+                    Closure(_) => panic!("unsupported closure aggregate"),
                 }
                 return;
             }
             Rvalue::Discriminant(place) => self.translate_load_discriminant(place),
-            _ => panic!("unsupported rvalue: {:?}", rvalue),
+            Rvalue::Repeat(_, _) => panic!("unsupported repeat rvalue"),
+            Rvalue::Len(_) => panic!("unsupported len rvalue"),
+            Rvalue::ShallowInitBox(_, _) => panic!("unsupported ShallowInitBox"),
+            Rvalue::ShallowInitBoxWithAlloc(_) => panic!("unsupported ShallowInitBoxWithAlloc"),
+            Rvalue::CopyForDeref(_) => panic!("unsupported CopyForDeref"),
         };
         self.translate_place_store(place, value)
     }
@@ -707,7 +722,7 @@ impl<'a> FunctionTranslator<'a> {
                     ty = match ty.kind(Interner) {
                         TyKind::Array(elem_ty, _size) => elem_ty.clone(),
                         TyKind::Slice(elem_ty) => elem_ty.clone(),
-                        _ => panic!("unsupported ty for indexing: {:?}", ty),
+                        _ => panic!("can't index ty: {:?}", ty),
                     };
                     // FIXME bounds check?
                     let layout = self.ty_layout(ty.clone());
@@ -778,7 +793,10 @@ impl<'a> FunctionTranslator<'a> {
                         }
                     }
                 }
-                _ => panic!("unsupported projection elem in place: {:?}", elem),
+                ProjectionElem::ClosureField(_) => panic!("unsupported closure field"),
+                ProjectionElem::ConstantIndex { .. } => panic!("unsupported constant index"),
+                ProjectionElem::Subslice { .. } => panic!("unsupported subslice"),
+                ProjectionElem::OpaqueCast(_) => panic!("unsupported opaque cast"),
             }
         }
         (kind, ty)
@@ -807,53 +825,25 @@ impl<'a> FunctionTranslator<'a> {
     }
     fn translate_place_store(&mut self, place: &Place, value: ValueKind) {
         let kind = self.translate_place(place);
-        self.translate_place_kind_store(kind, value)
+        self.translate_place_kind_store_with_offset(kind, 0, value)
     }
 
     fn translate_place_kind_store(&mut self, kind: PlaceKind, value: ValueKind) {
-        match kind {
-            PlaceKind::Variable(var) => match value {
-                ValueKind::Primitive(val, _) => {
-                    self.builder.def_var(var, val);
-                }
-                _ => panic!("unsupported value kind for variable store: {:?}", value),
-            },
-            PlaceKind::VariablePair(var1, var2) => match value {
-                ValueKind::ScalarPair(val1, val2) => {
-                    self.builder.def_var(var1, val1);
-                    self.builder.def_var(var2, val2);
-                }
-                _ => panic!("unsupported value kind for variable pair store: {:?}", value),
-            },
-            PlaceKind::Stack(dest, dest_offset) => match value {
-                ValueKind::Primitive(val, _) => {
-                    self.builder.ins().stack_store(val, dest, dest_offset);
-                }
-                ValueKind::ScalarPair(_val1, _val2) => {
-                    panic!("unsupported stack store of scalar pair")
-                }
-                ValueKind::Aggregate { slot, offset, size } => {
-                    let dest_slot = MemSlot::Stack(dest);
-                    self.translate_mem_copy(dest_slot, dest_offset, slot, offset, size)
-                }
-            },
-            PlaceKind::Mem(dest, dest_offset) => match value {
-                ValueKind::Primitive(val, _) => {
-                    self.builder.ins().store(MemFlags::trusted(), val, dest, dest_offset);
-                }
-                ValueKind::ScalarPair(_val1, _val2) => {
-                    panic!("unsupported mem store of scalar pair")
-                }
-                ValueKind::Aggregate { slot, offset: src_offset, size } => {
-                    let dest = MemSlot::MemAddr(dest);
-                    self.translate_mem_copy(dest, dest_offset, slot, src_offset, size)
-                }
-            },
-        }
+        self.translate_place_kind_store_with_offset(kind, 0, value)
     }
 
     fn translate_place_store_with_offset(&mut self, place: &Place, offset: i32, value: ValueKind) {
-        match self.translate_place(place) {
+        let kind = self.translate_place(place);
+        self.translate_place_kind_store_with_offset(kind, offset, value)
+    }
+
+    fn translate_place_kind_store_with_offset(
+        &mut self,
+        kind: PlaceKind,
+        offset: i32,
+        value: ValueKind,
+    ) {
+        match kind {
             PlaceKind::Variable(var) => {
                 if offset == 0 {
                     match value {
@@ -951,7 +941,7 @@ impl<'a> FunctionTranslator<'a> {
                 LocalKind::VariablePair(var1, var2)
             } else {
                 if !layout.is_sized() {
-                    panic!("unsupported unsized type in local");
+                    panic!("unsized type in local");
                 }
                 let size = layout.size.bytes_usize();
                 let slot = self.builder.create_sized_stack_slot(StackSlotData {
@@ -999,7 +989,7 @@ impl<'a> FunctionTranslator<'a> {
         match operand {
             Operand::Constant(konst) => self.translate_const(konst),
             Operand::Copy(place) | Operand::Move(place) => self.translate_place_copy(place),
-            _ => panic!("unsupported operand: {:?}", operand),
+            Operand::Static(_static_id) => panic!("unsupported static"),
         }
     }
 
@@ -1084,18 +1074,14 @@ impl<'a> FunctionTranslator<'a> {
                 let var_val = self.builder.use_var(var);
                 match abi {
                     Abi::Scalar(scalar) => ValueKind::Primitive(var_val, scalar_signedness(scalar)),
-                    _ => panic!("unsupported for var load: {:?}", abi),
+                    _ => unreachable!("non-scalar in variable: {:?}", abi),
                 }
             }
             PlaceKind::VariablePair(var1, var2) => {
                 let var1_val = self.builder.use_var(var1);
                 let var2_val = self.builder.use_var(var2);
-                match abi {
-                    Abi::ScalarPair(_scalar1, _scalar2) => {
-                        ValueKind::ScalarPair(var1_val, var2_val)
-                    }
-                    _ => panic!("unsupported for var pair load: {:?}", abi),
-                }
+                assert!(matches!(abi, Abi::ScalarPair(..)));
+                ValueKind::ScalarPair(var1_val, var2_val)
             }
             PlaceKind::Stack(slot, off) => match abi {
                 Abi::Scalar(scalar) => {
@@ -1206,7 +1192,7 @@ impl<'a> FunctionTranslator<'a> {
                 let result = self.builder.ins().fneg(value.assert_primitive().0);
                 ValueKind::Primitive(result, true)
             }
-            _ => panic!("unsupported type for negation: {:?}", ty),
+            _ => unreachable!("bad type for negation: {:?}", ty),
         }
     }
 
@@ -1223,7 +1209,7 @@ impl<'a> FunctionTranslator<'a> {
                 let result = self.builder.ins().bxor_imm(value, 1);
                 ValueKind::Primitive(result, false)
             }
-            _ => panic!("unsupported type for not: {:?}", ty),
+            _ => unreachable!("bad type for not: {:?}", ty),
         }
     }
 
@@ -1285,7 +1271,7 @@ impl<'a> FunctionTranslator<'a> {
                     );
                 }
             }
-            _ => panic!("tuple with unsupported abi: {:?}", layout.abi),
+            _ => unreachable!("tuple with bad abi: {:?}", layout.abi),
         };
     }
 

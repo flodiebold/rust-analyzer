@@ -543,6 +543,32 @@ fn test() -> i32 {
 }
 
 #[test]
+fn test_func_return_aggregate() {
+    check_i32(
+        r#"
+//- minicore: add, builtin_impls
+struct Foo {
+  a: i64,
+  b: i64,
+  c: i32,
+}
+fn func() -> Foo {
+    Foo {
+        a: 1,
+        b: 2,
+        c: 2,
+    }
+}
+fn test() -> i32 {
+    let foo = func();
+    foo.a as i32 + foo.b as i32 + foo.c
+}
+"#,
+        5,
+    )
+}
+
+#[test]
 fn test_enum_1() {
     check_i32(
         r#"
@@ -618,5 +644,217 @@ fn test() -> i32 {
 }
 "#,
         5,
+    )
+}
+
+#[test]
+fn test_indirect_call() {
+    check_i32(
+        r#"
+fn foo() -> i32 { 5 }
+fn test() -> i32 {
+    let f = foo as fn() -> i32;
+    f()
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_indirect_call_tuple_constructor() {
+    check_i32(
+        r#"
+struct Foo(i32);
+fn test() -> i32 {
+    let f = Foo as fn(i32) -> Foo;
+    f(5).0
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_ref_to_pair_elem() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let p = (3, 5);
+    let r = &p.1;
+    *r
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_ref_to_pair_elem_2() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let p = (1, (2, 3));
+    let r = &p.1;
+    r.0 + r.1
+}
+"#,
+        5,
+    )
+}
+
+#[test]
+fn test_zero_sized_struct() {
+    check_i32(
+        r#"
+struct Foo;
+impl Foo {
+    fn foo(self) -> i32 { 42 }
+}
+fn test() -> i32 {
+    Foo.foo()
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_trait_call() {
+    check_i32(
+        r#"
+trait Foo {
+    fn foo(self) -> i32;
+}
+struct Bar;
+impl Foo for Bar {
+    fn foo(self) -> i32 { 42 }
+}
+fn test() -> i32 {
+    Bar.foo()
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+#[ignore]
+fn test_trait_call_2() {
+    check_i32(
+        r#"
+trait Foo {
+    fn foo(self) -> i32;
+}
+struct Bar(i32);
+impl Foo for Bar {
+    fn foo(&self) -> i32 { self.0 }
+}
+fn test() -> i32 {
+    Bar(42).foo()
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_virtual_call() {
+    check_i32(
+        r#"
+trait Foo {
+    fn foo(self) -> i32;
+}
+struct Bar;
+impl Foo for Bar {
+    fn foo(&self) -> i32 { 42 }
+}
+fn test() -> i32 {
+    let b = &Bar as &dyn Foo;
+    b.foo()
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_static_1() {
+    check_i32(
+        r#"
+static FOO: i32 = 42;
+fn test() -> i32 {
+    FOO
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_static_2() {
+    check_i32(
+        r#"
+static FOO: (i32, i32) = (20, 22);
+fn test() -> i32 {
+    FOO.0 + FOO.1
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_static_3() {
+    check_i32(
+        r#"
+static FOO: (i32, i32, i32) = (20, 10, 12);
+fn test() -> i32 {
+    FOO.0 + FOO.1 + FOO.2
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_aggregate_const() {
+    check_i32(
+        r#"
+const FOO: (i32, i32, i32) = (20, 10, 12);
+fn test() -> i32 {
+    FOO.0 + FOO.1 + FOO.2
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_copy_pair_from_stack() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let foo = (1, (20, 22));
+    let (a, b) = foo.1;
+    a + b
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_copy_pair_from_mem() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let foo = (1, (20, 22));
+    let r = &foo;
+    let (a, b) = r.1;
+    a + b
+}
+"#,
+        42,
     )
 }
