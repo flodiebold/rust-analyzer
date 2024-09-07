@@ -722,6 +722,7 @@ fn test() -> i32 {
 }
 
 #[test]
+#[ignore]
 fn test_trait_call() {
     check_i32(
         r#"

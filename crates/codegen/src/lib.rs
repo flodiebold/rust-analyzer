@@ -331,13 +331,15 @@ impl<'a> FunctionTranslator<'a> {
                     let ty = self.body.locals[param].ty.clone();
                     let layout = self.ty_layout(ty);
                     let size = layout.size.bytes_usize() as i32;
-                    self.translate_mem_copy(
-                        MemSlot::Stack(ss),
-                        0,
-                        MemSlot::MemAddr(param_values.pop().unwrap()),
-                        0,
-                        size,
-                    );
+                    if size > 0 {
+                        self.translate_mem_copy(
+                            MemSlot::Stack(ss),
+                            0,
+                            MemSlot::MemAddr(param_values.pop().unwrap()),
+                            0,
+                            size,
+                        );
+                    }
                 }
             }
         }
@@ -448,11 +450,16 @@ impl<'a> FunctionTranslator<'a> {
                     .iter()
                     .flat_map(|a| {
                         let v = self.translate_operand(a);
+                        // FIXME is this correct?
                         match v {
                             ValueKind::Primitive(val, _) => [val].to_vec(),
                             ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
-                            ValueKind::Aggregate { slot, offset, size: _ } => {
-                                [self.translate_mem_slot_addr(slot, offset)].to_vec()
+                            ValueKind::Aggregate { slot, offset, size } => {
+                                if size == 0 {
+                                    Vec::new()
+                                } else {
+                                    [self.translate_mem_slot_addr(slot, offset)].to_vec()
+                                }
                             }
                         }
                     })
@@ -1389,12 +1396,10 @@ fn find_referenced_locals(body: &MirBody) -> FxHashSet<LocalId> {
     let mut found = FxHashSet::default();
     for (_, block) in body.basic_blocks.iter() {
         for stmt in &block.statements {
-            if let StatementKind::Assign(_, rv) = &stmt.kind {
-                if let Rvalue::Ref(_, pl) = rv {
-                    let local = get_direct_local(pl, &body.projection_store);
-                    if let Some(local) = local {
-                        found.insert(local);
-                    }
+            if let StatementKind::Assign(_, Rvalue::Ref(_, pl)) = &stmt.kind {
+                let local = get_direct_local(pl, &body.projection_store);
+                if let Some(local) = local {
+                    found.insert(local);
                 }
             }
         }
