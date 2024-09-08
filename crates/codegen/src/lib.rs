@@ -238,7 +238,7 @@ enum PlaceKind {
 
 #[derive(Clone, Copy, Debug)]
 enum ValueKind {
-    Primitive(Value, bool),
+    Primitive(Value),
     ScalarPair(Value, Value),
     Aggregate { slot: MemSlot, offset: i32, size: i32 },
 }
@@ -489,7 +489,7 @@ impl<'a> FunctionTranslator<'a> {
                         let v = self.translate_operand(a);
                         // FIXME is this correct?
                         match v {
-                            ValueKind::Primitive(val, _) => [val].to_vec(),
+                            ValueKind::Primitive(val) => [val].to_vec(),
                             ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
                             ValueKind::Aggregate { slot, offset, size } => {
                                 if size == 0 {
@@ -561,7 +561,7 @@ impl<'a> FunctionTranslator<'a> {
                 Abi::Uninhabited => panic!("uninhabited return"),
                 Abi::Scalar(_) => {
                     assert_eq!(results.len(), 1);
-                    ValueKind::Primitive(results[0], false)
+                    ValueKind::Primitive(results[0])
                 }
                 Abi::ScalarPair(_, _) => {
                     assert_eq!(results.len(), 2);
@@ -587,7 +587,7 @@ impl<'a> FunctionTranslator<'a> {
         let returns = match layout.abi {
             Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => Vec::new(),
             _ => match self.translate_copy_local_with_projection(return_slot(), &[]).0 {
-                ValueKind::Primitive(val, _) => [val].to_vec(),
+                ValueKind::Primitive(val) => [val].to_vec(),
                 ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
                 ValueKind::Aggregate { slot, offset, size: _ } => {
                     // FIXME: is this correct ABI-wise?
@@ -644,7 +644,7 @@ impl<'a> FunctionTranslator<'a> {
                                 self.builder.ins().iadd_imm(addr, off as i64)
                             }
                         };
-                        ValueKind::Primitive(addr, false)
+                        ValueKind::Primitive(addr)
                     }
                 }
             }
@@ -673,7 +673,7 @@ impl<'a> FunctionTranslator<'a> {
                             (Ordering::Less, true, _) => self.builder.ins().sextend(to_typ, value),
                             (Ordering::Equal, _, _) => value,
                         };
-                        ValueKind::Primitive(cast_value, to_sign)
+                        ValueKind::Primitive(cast_value)
                     }
                     CastKind::Pointer(UnsafeFnPointer | MutToConstPointer | ArrayToPointer) => {
                         // nothing to do here
@@ -717,7 +717,7 @@ impl<'a> FunctionTranslator<'a> {
                         };
                         let ptr_typ = self.module.isa().pointer_type();
                         let addr = self.builder.ins().func_addr(ptr_typ, func_ref);
-                        ValueKind::Primitive(addr, false)
+                        ValueKind::Primitive(addr)
                     }
 
                     _ => panic!("unsupported cast: {:?} {:?} {:?}", kind, from_ty, to_ty),
@@ -944,7 +944,7 @@ impl<'a> FunctionTranslator<'a> {
             PlaceKind::Variable(var) => {
                 if offset == 0 {
                     match value {
-                        ValueKind::Primitive(val, _) => {
+                        ValueKind::Primitive(val) => {
                             self.builder.def_var(var, val);
                         }
                         _ => panic!("unsupported value kind for variable store: {:?}", value),
@@ -960,7 +960,7 @@ impl<'a> FunctionTranslator<'a> {
                             self.builder.def_var(var1, val1);
                             self.builder.def_var(var2, val2);
                         }
-                        ValueKind::Primitive(val, _) => {
+                        ValueKind::Primitive(val) => {
                             self.builder.def_var(var1, val);
                         }
                         _ => panic!("unsupported value kind for variable pair store: {:?}", value),
@@ -970,7 +970,7 @@ impl<'a> FunctionTranslator<'a> {
                 }
             }
             PlaceKind::Stack(dest, dest_offset) => match value {
-                ValueKind::Primitive(value, _) => {
+                ValueKind::Primitive(value) => {
                     self.builder.ins().stack_store(value, dest, offset + dest_offset);
                 }
                 ValueKind::ScalarPair(val1, val2) => {
@@ -986,7 +986,7 @@ impl<'a> FunctionTranslator<'a> {
                 }
             },
             PlaceKind::Mem(dest, dest_offset) => match value {
-                ValueKind::Primitive(value, _) => {
+                ValueKind::Primitive(value) => {
                     self.builder.ins().store(
                         MemFlags::trusted(),
                         value,
@@ -1073,7 +1073,7 @@ impl<'a> FunctionTranslator<'a> {
                 let addr =
                     self.builder.ins().global_value(self.module.isa().pointer_type(), global_value);
                 let ptr_ty = TyKind::Raw(hir_ty::Mutability::Mut, ty).intern(Interner);
-                (ValueKind::Primitive(addr, false), ptr_ty)
+                (ValueKind::Primitive(addr), ptr_ty)
             }
         }
     }
@@ -1109,7 +1109,6 @@ impl<'a> FunctionTranslator<'a> {
             Abi::Uninhabited => unreachable!(),
             Abi::Scalar(scalar) => {
                 let typ = translate_scalar_type(scalar, self.module.isa());
-                let signed = scalar_signedness(scalar);
                 let val = bytes_to_imm64(bytes);
                 let val = if is_ref {
                     let addr = memory_addr.expect("ref const without memory");
@@ -1117,7 +1116,7 @@ impl<'a> FunctionTranslator<'a> {
                 } else {
                     self.builder.ins().iconst(typ, val)
                 };
-                ValueKind::Primitive(val, signed)
+                ValueKind::Primitive(val)
             }
             Abi::ScalarPair(s1, s2) => {
                 let typ1 = translate_scalar_type(s1, self.module.isa());
@@ -1172,7 +1171,7 @@ impl<'a> FunctionTranslator<'a> {
             PlaceKind::Variable(var) => {
                 let var_val = self.builder.use_var(var);
                 match abi {
-                    Abi::Scalar(scalar) => ValueKind::Primitive(var_val, scalar_signedness(scalar)),
+                    Abi::Scalar(_) => ValueKind::Primitive(var_val),
                     _ => unreachable!("non-scalar in variable: {:?}", abi),
                 }
             }
@@ -1203,7 +1202,7 @@ impl<'a> FunctionTranslator<'a> {
                         slot,
                         offset,
                     );
-                    ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
+                    ValueKind::Primitive(loaded_val)
                 }
                 Abi::Aggregate { sized: true } => ValueKind::Aggregate {
                     slot: MemSlot::Stack(slot),
@@ -1220,7 +1219,7 @@ impl<'a> FunctionTranslator<'a> {
                         addr,
                         offset,
                     );
-                    ValueKind::Primitive(loaded_val, scalar_signedness(scalar))
+                    ValueKind::Primitive(loaded_val)
                 }
                 Abi::Aggregate { sized: true } => ValueKind::Aggregate {
                     slot: MemSlot::MemAddr(addr),
@@ -1239,7 +1238,7 @@ impl<'a> FunctionTranslator<'a> {
         right: &Operand,
     ) -> ValueKind {
         let (left, ty1) = self.translate_operand_with_ty(left);
-        let (right, ty2) = self.translate_operand_with_ty(right);
+        let (right, _) = self.translate_operand_with_ty(right);
         let left = left.assert_primitive();
         let right = right.assert_primitive();
         let signed = match ty1.kind(Interner) {
@@ -1280,7 +1279,7 @@ impl<'a> FunctionTranslator<'a> {
             BinOp::Shr => self.builder.ins().ushr(left, right),
             BinOp::Offset => panic!("unsupported binop: offset"),
         };
-        ValueKind::Primitive(result, signed)
+        ValueKind::Primitive(result)
     }
 
     fn ty_layout(&self, ty: Ty) -> Arc<Layout> {
@@ -1316,11 +1315,11 @@ impl<'a> FunctionTranslator<'a> {
         match ty.kind(Interner) {
             TyKind::Scalar(hir_ty::Scalar::Int(_)) => {
                 let result = self.builder.ins().ineg(value.assert_primitive());
-                ValueKind::Primitive(result, true)
+                ValueKind::Primitive(result)
             }
             TyKind::Scalar(hir_ty::Scalar::Float(_)) => {
                 let result = self.builder.ins().fneg(value.assert_primitive());
-                ValueKind::Primitive(result, true)
+                ValueKind::Primitive(result)
             }
             _ => unreachable!("bad type for negation: {:?}", ty),
         }
@@ -1332,12 +1331,12 @@ impl<'a> FunctionTranslator<'a> {
             TyKind::Scalar(hir_ty::Scalar::Int(_) | hir_ty::Scalar::Uint(_)) => {
                 let value = value.assert_primitive();
                 let result = self.builder.ins().bnot(value);
-                ValueKind::Primitive(result, false)
+                ValueKind::Primitive(result)
             }
             TyKind::Scalar(hir_ty::Scalar::Bool) => {
                 let value = value.assert_primitive();
                 let result = self.builder.ins().bxor_imm(value, 1);
-                ValueKind::Primitive(result, false)
+                ValueKind::Primitive(result)
             }
             _ => unreachable!("bad type for not: {:?}", ty),
         }
@@ -1442,7 +1441,7 @@ impl<'a> FunctionTranslator<'a> {
             }
         };
         tag = self.builder.ins().uextend(types::I128, tag);
-        ValueKind::Primitive(tag, false)
+        ValueKind::Primitive(tag)
     }
 
     fn store_tag_and_get_variant_layout<'b>(
@@ -1485,7 +1484,6 @@ impl<'a> FunctionTranslator<'a> {
                     let field_offset = layout.fields.offset(*tag_field);
                     let discriminant = ValueKind::Primitive(
                         self.builder.ins().iconst(discr_typ, discriminant as i64),
-                        false,
                     );
                     self.translate_place_store_with_offset(
                         place,
@@ -1550,7 +1548,7 @@ fn bytes_to_imm64(bytes: &[u8]) -> Imm64 {
 impl ValueKind {
     fn assert_primitive(&self) -> Value {
         match *self {
-            ValueKind::Primitive(val, _) => val,
+            ValueKind::Primitive(val) => val,
             _ => panic!("non-primitive value"),
         }
     }
@@ -1640,15 +1638,6 @@ fn translate_scalar_type(scalar: Scalar, isa: &dyn TargetIsa) -> Type {
         Primitive::Float(Float::F128) => types::F128,
         Primitive::Pointer(AddressSpace::DATA) => isa.pointer_type(),
         Primitive::Pointer(_) => panic!("unsupported address space"),
-    }
-}
-
-fn scalar_signedness(scalar: Scalar) -> bool {
-    use hir_def::layout::Primitive;
-    let (Scalar::Initialized { value, valid_range: _ } | Scalar::Union { value }) = scalar;
-    match value {
-        Primitive::Int(_, signedness) => signedness,
-        Primitive::Float(_) | Primitive::Pointer(_) => false,
     }
 }
 
