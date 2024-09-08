@@ -517,8 +517,19 @@ impl<'a> FunctionTranslator<'a> {
                         self.store_func_call_return(&results, destination);
                     }
                     None => {
-                        let _func = self.translate_operand(func);
-                        panic!("unsupported indirect call");
+                        let (func, ty) = self.translate_operand_with_ty(func);
+                        let sig = ty
+                            .callable_sig(self.db.upcast())
+                            .expect("indirect call on non-callable");
+                        let sig = translate_signature(&sig, self.module.isa(), self.db, &self.env);
+                        let sig_ref = self.builder.import_signature(sig);
+                        let call = self.builder.ins().call_indirect(
+                            sig_ref,
+                            func.assert_primitive().0,
+                            &args,
+                        );
+                        let results = self.builder.inst_results(call).to_vec();
+                        self.store_func_call_return(&results, destination);
                     }
                     _ => unreachable!(),
                 }
@@ -680,6 +691,33 @@ impl<'a> FunctionTranslator<'a> {
                             }
                             _ => panic!("unsupported unsize from {:?} to {:?}", from_ty, to_ty),
                         }
+                    }
+                    CastKind::Pointer(ReifyFnPointer) => {
+                        let TyKind::FnDef(fn_id, subst) = from_ty.kind(Interner) else {
+                            panic!("reify non-fn")
+                        };
+                        let callable_def = self.db.lookup_intern_callable_def((*fn_id).into());
+                        let func_ref = match callable_def {
+                            CallableDefId::FunctionId(func) => {
+                                let mono_func_id = self.db.intern_mono_function(MonoFunction {
+                                    func,
+                                    subst: subst.clone(),
+                                });
+                                let shim = self.get_shim(mono_func_id);
+                                let func_ref =
+                                    self.module.declare_func_in_func(shim, &mut self.builder.func);
+                                func_ref
+                            }
+                            CallableDefId::StructId(_) => {
+                                panic!("unsupported reify of struct constructor")
+                            }
+                            CallableDefId::EnumVariantId(_) => {
+                                panic!("unsupported reify of enum variant constructor")
+                            }
+                        };
+                        let ptr_typ = self.module.isa().pointer_type();
+                        let addr = self.builder.ins().func_addr(ptr_typ, func_ref);
+                        ValueKind::Primitive(addr, false)
                     }
 
                     _ => panic!("unsupported cast: {:?} {:?} {:?}", kind, from_ty, to_ty),
