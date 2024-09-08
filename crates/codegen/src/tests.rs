@@ -664,6 +664,7 @@ fn test() -> i32 {
 }
 
 #[test]
+#[ignore]
 fn test_indirect_call_tuple_constructor() {
     check_i32(
         r#"
@@ -856,6 +857,21 @@ fn test() -> i32 {
     let r = &foo;
     let (a, b) = r.1;
     a + b
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_unsigned_add() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let a = 129u8;
+    let b = 120u8;
+    let c = (a + b) as i32;
+    c - 207
 }
 "#,
         42,

@@ -404,7 +404,7 @@ impl<'a> FunctionTranslator<'a> {
                 self.builder.ins().jump(self.blocks[*target], &[]);
             }
             TerminatorKind::SwitchInt { discr, targets } => {
-                let discr = self.translate_operand(discr).assert_primitive().0;
+                let discr = self.translate_operand(discr).assert_primitive();
                 let mut switch = Switch::new();
                 for (val, target) in targets.iter() {
                     switch.set_entry(val, self.blocks[target]);
@@ -525,7 +525,7 @@ impl<'a> FunctionTranslator<'a> {
                         let sig_ref = self.builder.import_signature(sig);
                         let call = self.builder.ins().call_indirect(
                             sig_ref,
-                            func.assert_primitive().0,
+                            func.assert_primitive(),
                             &args,
                         );
                         let results = self.builder.inst_results(call).to_vec();
@@ -663,7 +663,7 @@ impl<'a> FunctionTranslator<'a> {
                             }
                             _ => panic!("int with non-scalar abi"),
                         };
-                        let value = value.assert_primitive().0;
+                        let value = value.assert_primitive();
                         let cast_value = match (from_sz.cmp(&to_sz), from_sign, to_sign) {
                             (Ordering::Greater, _, _) => {
                                 // FIXME is this correct for signed reductions?
@@ -680,13 +680,13 @@ impl<'a> FunctionTranslator<'a> {
                         value
                     }
                     CastKind::Pointer(Unsize) => {
-                        let value = value.assert_primitive().0;
+                        let value = value.assert_primitive();
                         let from_pointee =
                             from_ty.as_reference_or_ptr().expect("pointer cast without pointer").0;
                         match from_pointee.kind(Interner) {
                             TyKind::Array(_, size) => {
                                 assert!(matches!(to_layout.abi, Abi::ScalarPair(_, _)));
-                                let size_val = self.translate_const(size).0.assert_primitive().0;
+                                let size_val = self.translate_const(size).0.assert_primitive();
                                 ValueKind::ScalarPair(value, size_val)
                             }
                             _ => panic!("unsupported unsize from {:?} to {:?}", from_ty, to_ty),
@@ -820,7 +820,7 @@ impl<'a> FunctionTranslator<'a> {
                     let elem_size =
                         self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
                     let idx =
-                        self.translate_copy_local_with_projection(*idx, &[]).0.assert_primitive().0;
+                        self.translate_copy_local_with_projection(*idx, &[]).0.assert_primitive();
                     let idx_offset = self.builder.ins().imul(idx, elem_size);
                     let addr = self.builder.ins().iadd(addr, idx_offset);
                     kind = PlaceKind::Mem(addr, 0);
@@ -966,7 +966,7 @@ impl<'a> FunctionTranslator<'a> {
                         _ => panic!("unsupported value kind for variable pair store: {:?}", value),
                     }
                 } else {
-                    self.builder.def_var(var2, value.assert_primitive().0);
+                    self.builder.def_var(var2, value.assert_primitive());
                 }
             }
             PlaceKind::Stack(dest, dest_offset) => match value {
@@ -1238,31 +1238,49 @@ impl<'a> FunctionTranslator<'a> {
         left: &Operand,
         right: &Operand,
     ) -> ValueKind {
-        let (left, signed1) = self.translate_operand(left).assert_primitive();
-        let (right, signed2) = self.translate_operand(right).assert_primitive();
-        assert_eq!(signed1, signed2);
-        if !signed1 {
-            panic!("unsupported unsigned operation");
-        }
+        let (left, ty1) = self.translate_operand_with_ty(left);
+        let (right, ty2) = self.translate_operand_with_ty(right);
+        let left = left.assert_primitive();
+        let right = right.assert_primitive();
+        let signed = match ty1.kind(Interner) {
+            TyKind::Scalar(hir_ty::Scalar::Int(_)) => true,
+            TyKind::Scalar(hir_ty::Scalar::Uint(_)) => false,
+            _ => true,
+        };
         let result = match binop {
             // FIXME checked?
             BinOp::Add => self.builder.ins().iadd(left, right),
             BinOp::Sub => self.builder.ins().isub(left, right),
             BinOp::Mul => self.builder.ins().imul(left, right),
-            // FIXME handle unsigned
-            BinOp::Div => self.builder.ins().sdiv(left, right),
-            BinOp::Rem => self.builder.ins().srem(left, right),
+            BinOp::Div if signed => self.builder.ins().sdiv(left, right),
+            BinOp::Div => self.builder.ins().udiv(left, right),
+            BinOp::Rem if signed => self.builder.ins().srem(left, right),
+            BinOp::Rem => self.builder.ins().urem(left, right),
 
             BinOp::Eq => self.builder.ins().icmp(IntCC::Equal, left, right),
             BinOp::Ne => self.builder.ins().icmp(IntCC::NotEqual, left, right),
-            // FIXME handle unsigned
-            BinOp::Lt => self.builder.ins().icmp(IntCC::SignedLessThan, left, right),
-            BinOp::Le => self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right),
-            BinOp::Gt => self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right),
-            BinOp::Ge => self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right),
-            _ => panic!("unsupported binop: {:?}", binop),
+            BinOp::Lt if signed => self.builder.ins().icmp(IntCC::SignedLessThan, left, right),
+            BinOp::Le if signed => {
+                self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right)
+            }
+            BinOp::Gt if signed => self.builder.ins().icmp(IntCC::SignedGreaterThan, left, right),
+            BinOp::Ge if signed => {
+                self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right)
+            }
+            BinOp::Lt => self.builder.ins().icmp(IntCC::UnsignedLessThan, left, right),
+            BinOp::Le => self.builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, left, right),
+            BinOp::Gt => self.builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right),
+            BinOp::Ge => self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, left, right),
+
+            BinOp::BitXor => self.builder.ins().bxor(left, right),
+            BinOp::BitAnd => self.builder.ins().band(left, right),
+            BinOp::BitOr => self.builder.ins().bor(left, right),
+            BinOp::Shl => self.builder.ins().ishl(left, right),
+            BinOp::Shr if signed => self.builder.ins().sshr(left, right),
+            BinOp::Shr => self.builder.ins().ushr(left, right),
+            BinOp::Offset => panic!("unsupported binop: offset"),
         };
-        ValueKind::Primitive(result, signed1)
+        ValueKind::Primitive(result, signed)
     }
 
     fn ty_layout(&self, ty: Ty) -> Arc<Layout> {
@@ -1297,11 +1315,11 @@ impl<'a> FunctionTranslator<'a> {
         let (value, ty) = self.translate_operand_with_ty(op);
         match ty.kind(Interner) {
             TyKind::Scalar(hir_ty::Scalar::Int(_)) => {
-                let result = self.builder.ins().ineg(value.assert_primitive().0);
+                let result = self.builder.ins().ineg(value.assert_primitive());
                 ValueKind::Primitive(result, true)
             }
             TyKind::Scalar(hir_ty::Scalar::Float(_)) => {
-                let result = self.builder.ins().fneg(value.assert_primitive().0);
+                let result = self.builder.ins().fneg(value.assert_primitive());
                 ValueKind::Primitive(result, true)
             }
             _ => unreachable!("bad type for negation: {:?}", ty),
@@ -1312,12 +1330,12 @@ impl<'a> FunctionTranslator<'a> {
         let (value, ty) = self.translate_operand_with_ty(op);
         match ty.kind(Interner) {
             TyKind::Scalar(hir_ty::Scalar::Int(_) | hir_ty::Scalar::Uint(_)) => {
-                let (value, signed) = value.assert_primitive();
+                let value = value.assert_primitive();
                 let result = self.builder.ins().bnot(value);
-                ValueKind::Primitive(result, signed)
+                ValueKind::Primitive(result, false)
             }
             TyKind::Scalar(hir_ty::Scalar::Bool) => {
-                let value = value.assert_primitive().0;
+                let value = value.assert_primitive();
                 let result = self.builder.ins().bxor_imm(value, 1);
                 ValueKind::Primitive(result, false)
             }
@@ -1530,9 +1548,9 @@ fn bytes_to_imm64(bytes: &[u8]) -> Imm64 {
 }
 
 impl ValueKind {
-    fn assert_primitive(&self) -> (Value, bool) {
+    fn assert_primitive(&self) -> Value {
         match *self {
-            ValueKind::Primitive(val, signedness) => (val, signedness),
+            ValueKind::Primitive(val, _) => val,
             _ => panic!("non-primitive value"),
         }
     }
@@ -1660,7 +1678,7 @@ fn get_int_ty(ty: &Ty, isa: &dyn TargetIsa) -> Option<(u8, bool)> {
                 chalk_ir::UintTy::U64 => 8,
                 chalk_ir::UintTy::U128 => 16,
             },
-            true,
+            false,
         ),
         _ => return None,
     })
