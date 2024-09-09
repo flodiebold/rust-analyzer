@@ -877,3 +877,43 @@ fn test() -> i32 {
         42,
     )
 }
+
+#[test]
+fn test_repeat() {
+    check_i32(
+        r#"
+//- minicore: index, slice
+fn test() -> i32 {
+    let a = [2i32; 21];
+    let i = 0;
+    let mut x = 0;
+    while i < 21 {
+        x = x + a[i];
+        i = i + 1;
+    }
+    x
+}
+"#,
+        42,
+    )
+}
+
+#[test]
+fn test_match_len() {
+    check_i32(
+        r#"
+//- minicore: index, slice, coerce_unsized
+fn test() -> i32 {
+    let a = &[10i32, 20, 12] as &[_];
+    match a {
+        &[] => 5,
+        &[_] => 6,
+        &[_, _] => 7,
+        &[x, y, z] => x + y + z,
+        _ => 4,
+    }
+}
+"#,
+        42,
+    )
+}

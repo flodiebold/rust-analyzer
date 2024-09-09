@@ -38,7 +38,8 @@ use hir_ty::{
         BasicBlockId, BinOp, CastKind, LocalId, MirBody, Operand, Place, ProjectionElem, Rvalue,
         StatementKind, TerminatorKind, UnOp,
     },
-    AdtId, FnAbi, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyExt, TyKind,
+    AdtId, ConcreteConst, Const, ConstValue, FnAbi, Interner, MemoryMap, Substitution,
+    TraitEnvironment, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -768,7 +769,33 @@ impl<'a> FunctionTranslator<'a> {
                 return;
             }
             Rvalue::Discriminant(place) => self.translate_load_discriminant(place),
-            Rvalue::Repeat(_, _) => panic!("unsupported repeat rvalue"),
+            Rvalue::Repeat(op, n) => {
+                let num = const_to_int(n);
+                let val = self.translate_operand(op);
+                let (place_kind, ty) = self.translate_place_with_ty(place);
+                // FIXME use memset for u8
+                let loop_block = self.builder.create_block();
+                let loop_block2 = self.builder.create_block();
+                let done_block = self.builder.create_block();
+                let pointer_type = self.module.isa().pointer_type();
+                let index = self.builder.append_block_param(loop_block, pointer_type);
+                let zero = self.builder.ins().iconst(pointer_type, 0);
+                self.builder.ins().jump(loop_block, &[zero]);
+
+                self.builder.switch_to_block(loop_block);
+                let done = self.builder.ins().icmp_imm(IntCC::Equal, index, num as i64);
+                self.builder.ins().brif(done, done_block, &[], loop_block2, &[]);
+
+                self.builder.switch_to_block(loop_block2);
+                let (place_kind, place_elem_ty) = self.place_index(place_kind, ty, index);
+                self.translate_place_kind_store(place_kind, place_elem_ty, val);
+                let index = self.builder.ins().iadd_imm(index, 1);
+                self.builder.ins().jump(loop_block, &[index]);
+
+                self.builder.switch_to_block(done_block);
+                self.builder.ins().nop();
+                return;
+            }
             Rvalue::Len(_) => panic!("unsupported len rvalue"),
             Rvalue::ShallowInitBox(_, _) => panic!("unsupported ShallowInitBox"),
             Rvalue::ShallowInitBoxWithAlloc(_) => panic!("unsupported ShallowInitBoxWithAlloc"),
@@ -785,6 +812,21 @@ impl<'a> FunctionTranslator<'a> {
         let projection = place.projection.lookup(&self.body.projection_store);
         let local = place.local;
         self.translate_local_with_projection(local, projection)
+    }
+
+    fn place_index(&mut self, kind: PlaceKind, ty: Ty, idx: Value) -> (PlaceKind, Ty) {
+        let addr = self.translate_place_kind_addr(kind);
+        let ty = match ty.kind(Interner) {
+            TyKind::Array(elem_ty, _size) => elem_ty.clone(),
+            TyKind::Slice(elem_ty) => elem_ty.clone(),
+            _ => panic!("can't index ty: {:?}", ty),
+        };
+        let layout = self.ty_layout(ty.clone());
+        let ptr_typ = self.module.isa().pointer_type();
+        let elem_size = self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
+        let idx_offset = self.builder.ins().imul(idx, elem_size);
+        let addr = self.builder.ins().iadd(addr, idx_offset);
+        (PlaceKind::Mem(addr, 0), ty)
     }
 
     fn translate_local_with_projection(
@@ -808,22 +850,9 @@ impl<'a> FunctionTranslator<'a> {
                     kind = PlaceKind::Mem(addr, 0);
                 }
                 ProjectionElem::Index(idx) => {
-                    let addr = self.translate_place_kind_addr(kind);
-                    ty = match ty.kind(Interner) {
-                        TyKind::Array(elem_ty, _size) => elem_ty.clone(),
-                        TyKind::Slice(elem_ty) => elem_ty.clone(),
-                        _ => panic!("can't index ty: {:?}", ty),
-                    };
-                    // FIXME bounds check?
-                    let layout = self.ty_layout(ty.clone());
-                    let ptr_typ = self.module.isa().pointer_type();
-                    let elem_size =
-                        self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
                     let idx =
                         self.translate_copy_local_with_projection(*idx, &[]).0.assert_primitive();
-                    let idx_offset = self.builder.ins().imul(idx, elem_size);
-                    let addr = self.builder.ins().iadd(addr, idx_offset);
-                    kind = PlaceKind::Mem(addr, 0);
+                    (kind, ty) = self.place_index(kind, ty, idx);
                 }
                 ProjectionElem::Field(Either::Right(tuple_idx)) => {
                     let idx = tuple_idx.index as usize;
@@ -1498,6 +1527,17 @@ impl<'a> FunctionTranslator<'a> {
             }
         }
     }
+}
+
+fn const_to_int(n: &Const) -> u64 {
+    let ConstValue::Concrete(c) = &n.data(Interner).value else { panic!("non-concrete const") };
+    let hir_ty::ConstScalar::Bytes(bytes, mm) = &c.interned else {
+        panic!("bad const: {:?}", c.interned)
+    };
+    assert!(matches!(mm, MemoryMap::Empty));
+    let mut data: [u8; 8] = [0; 8];
+    data[0..bytes.len()].copy_from_slice(&bytes);
+    u64::from_le_bytes(data)
 }
 
 /// Walks the full MIR body to find locals that are referenced, meaning that
