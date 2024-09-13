@@ -1,3 +1,4 @@
+mod pointer;
 #[cfg(test)]
 mod test_db;
 #[cfg(test)]
@@ -42,6 +43,7 @@ use hir_ty::{
     TraitEnvironment, Ty, TyExt, TyKind,
 };
 use la_arena::ArenaMap;
+use pointer::Pointer;
 use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::InternValueTrivial;
 use smallvec::SmallVec;
@@ -158,6 +160,7 @@ impl Jit {
             .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
 
         let mut translator = FunctionTranslator {
+            pointer_type: self.module.isa().pointer_type(),
             db,
             body: &body,
             variables: ArenaMap::new(),
@@ -177,6 +180,8 @@ impl Jit {
 
         translator.builder.seal_all_blocks(); // FIXME do this better?
         translator.builder.finalize();
+
+        eprintln!("{}", self.ctx.func);
 
         let id = self
             .module
@@ -220,6 +225,7 @@ struct FunctionTranslator<'a> {
     env: Arc<TraitEnvironment>,
     engine: &'a JitEngine<'a>,
     referenced_locals: FxHashSet<LocalId>,
+    pointer_type: Type,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -233,15 +239,14 @@ enum LocalKind {
 enum PlaceKind {
     Variable(Variable),
     VariablePair(Variable, Variable),
-    Stack(StackSlot, i32),
-    Mem(Value, i32),
+    Addr(Pointer, Option<Value>),
 }
 
 #[derive(Clone, Copy, Debug)]
 enum ValueKind {
     Primitive(Value),
     ScalarPair(Value, Value),
-    Aggregate { slot: MemSlot, offset: i32, size: i32 },
+    Aggregate { pointer: Pointer, size: i32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -371,10 +376,8 @@ impl<'a> FunctionTranslator<'a> {
                     let size = layout.size.bytes_usize() as i32;
                     if size > 0 {
                         self.translate_mem_copy(
-                            MemSlot::Stack(ss),
-                            0,
-                            MemSlot::MemAddr(param_values.pop().unwrap()),
-                            0,
+                            Pointer::stack_slot(ss),
+                            Pointer::new(param_values.pop().unwrap()),
                             size,
                         );
                     }
@@ -492,11 +495,11 @@ impl<'a> FunctionTranslator<'a> {
                         match v {
                             ValueKind::Primitive(val) => [val].to_vec(),
                             ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
-                            ValueKind::Aggregate { slot, offset, size } => {
+                            ValueKind::Aggregate { pointer, size } => {
                                 if size == 0 {
                                     Vec::new()
                                 } else {
-                                    [self.translate_mem_slot_addr(slot, offset)].to_vec()
+                                    [pointer.get_addr(self)].to_vec()
                                 }
                             }
                         }
@@ -574,7 +577,8 @@ impl<'a> FunctionTranslator<'a> {
                     }
                     assert_eq!(results.len(), 1);
                     let size = ret_ty_layout.size.bytes_usize() as i32;
-                    ValueKind::Aggregate { slot: MemSlot::MemAddr(results[0]), offset: 0, size }
+                    let pointer = Pointer::new(results[0]);
+                    ValueKind::Aggregate { pointer, size }
                 }
                 Abi::Vector { .. } => panic!("unsupported vector return"),
             };
@@ -590,9 +594,9 @@ impl<'a> FunctionTranslator<'a> {
             _ => match self.translate_copy_local_with_projection(return_slot(), &[]).0 {
                 ValueKind::Primitive(val) => [val].to_vec(),
                 ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
-                ValueKind::Aggregate { slot, offset, size: _ } => {
+                ValueKind::Aggregate { pointer, size: _ } => {
                     // FIXME: is this correct ABI-wise?
-                    let addr = self.translate_mem_slot_addr(slot, offset);
+                    let addr = pointer.get_addr(self);
                     [addr].to_vec()
                 }
             },
@@ -625,7 +629,6 @@ impl<'a> FunctionTranslator<'a> {
             Rvalue::UnaryOp(UnOp::Not, op) => self.translate_not(op),
             Rvalue::Ref(_, place) => {
                 let projection = place.projection.lookup(&self.body.projection_store);
-                let typ = self.module.isa().pointer_type();
                 match projection {
                     [rest @ .., ProjectionElem::Deref] => {
                         self.translate_copy_local_with_projection(place.local, rest).0
@@ -637,13 +640,7 @@ impl<'a> FunctionTranslator<'a> {
                             PlaceKind::VariablePair(_, _) => {
                                 panic!("unsupported ref to variable pair")
                             }
-                            PlaceKind::Stack(ss, off) => {
-                                let addr = self.builder.ins().stack_addr(typ, ss, off);
-                                addr
-                            }
-                            PlaceKind::Mem(addr, off) => {
-                                self.builder.ins().iadd_imm(addr, off as i64)
-                            }
+                            PlaceKind::Addr(pointer, _) => pointer.get_addr(self),
                         };
                         ValueKind::Primitive(addr)
                     }
@@ -826,7 +823,7 @@ impl<'a> FunctionTranslator<'a> {
         let elem_size = self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
         let idx_offset = self.builder.ins().imul(idx, elem_size);
         let addr = self.builder.ins().iadd(addr, idx_offset);
-        (PlaceKind::Mem(addr, 0), ty)
+        (PlaceKind::Addr(Pointer::new(addr), None), ty)
     }
 
     fn translate_local_with_projection(
@@ -839,7 +836,7 @@ impl<'a> FunctionTranslator<'a> {
         let mut kind = match var {
             LocalKind::Variable(var) => PlaceKind::Variable(var),
             LocalKind::VariablePair(var1, var2) => PlaceKind::VariablePair(var1, var2),
-            LocalKind::Stack(ss) => PlaceKind::Stack(ss, 0),
+            LocalKind::Stack(ss) => PlaceKind::Addr(Pointer::stack_slot(ss), None),
         };
         for elem in projection {
             match elem {
@@ -847,7 +844,8 @@ impl<'a> FunctionTranslator<'a> {
                     ty = ty.as_reference_or_ptr().expect("non-ptr deref target").0.clone();
                     let addr =
                         self.translate_load_pointer_value(kind, self.module.isa().pointer_type());
-                    kind = PlaceKind::Mem(addr, 0);
+                    // FIXME load metadata here
+                    kind = PlaceKind::Addr(Pointer::new(addr), None);
                 }
                 ProjectionElem::Index(idx) => {
                     let idx =
@@ -867,13 +865,9 @@ impl<'a> FunctionTranslator<'a> {
                             assert!(idx < 2);
                             kind = PlaceKind::Variable(if idx == 0 { var1 } else { var2 });
                         }
-                        PlaceKind::Stack(ss, off) => {
+                        PlaceKind::Addr(pointer, _) => {
                             let offset = layout.fields.offset(idx).bytes_usize();
-                            kind = PlaceKind::Stack(ss, off + offset as i32);
-                        }
-                        PlaceKind::Mem(addr, off) => {
-                            let offset = layout.fields.offset(idx).bytes_usize();
-                            kind = PlaceKind::Mem(addr, off + offset as i32);
+                            kind = PlaceKind::Addr(pointer.offset_i64(self, offset as i64), None);
                         }
                     }
                 }
@@ -904,11 +898,8 @@ impl<'a> FunctionTranslator<'a> {
                         PlaceKind::VariablePair(var1, var2) => {
                             kind = PlaceKind::Variable(if offset == 0 { var1 } else { var2 });
                         }
-                        PlaceKind::Stack(ss, off) => {
-                            kind = PlaceKind::Stack(ss, off + offset as i32);
-                        }
-                        PlaceKind::Mem(addr, off) => {
-                            kind = PlaceKind::Mem(addr, off + offset as i32);
+                        PlaceKind::Addr(pointer, _) => {
+                            kind = PlaceKind::Addr(pointer.offset_i64(self, offset as i64), None)
                         }
                     }
                 }
@@ -925,10 +916,7 @@ impl<'a> FunctionTranslator<'a> {
         match kind {
             PlaceKind::Variable(_) => panic!("trying to take addr of variable"),
             PlaceKind::VariablePair(_, _) => panic!("trying to take addr of variable pair"),
-            PlaceKind::Stack(ss, off) => {
-                self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, off)
-            }
-            PlaceKind::Mem(addr, off) => self.builder.ins().iadd_imm(addr, off as i64),
+            PlaceKind::Addr(pointer, _) => pointer.get_addr(self),
         }
     }
 
@@ -936,10 +924,7 @@ impl<'a> FunctionTranslator<'a> {
         match kind {
             PlaceKind::Variable(var) => self.builder.use_var(var),
             PlaceKind::VariablePair(var1, _) => self.builder.use_var(var1),
-            PlaceKind::Stack(ss, off) => self.builder.ins().stack_load(typ, ss, off),
-            PlaceKind::Mem(addr, off) => {
-                self.builder.ins().load(typ, MemFlags::trusted(), addr, off)
-            }
+            PlaceKind::Addr(pointer, _) => pointer.load(self, typ, MemFlags::trusted()),
         }
     }
     fn translate_place_store(&mut self, place: &Place, value: ValueKind) {
@@ -998,52 +983,23 @@ impl<'a> FunctionTranslator<'a> {
                     self.builder.def_var(var2, value.assert_primitive());
                 }
             }
-            PlaceKind::Stack(dest, dest_offset) => match value {
-                ValueKind::Primitive(value) => {
-                    self.builder.ins().stack_store(value, dest, offset + dest_offset);
+            PlaceKind::Addr(pointer, _) => {
+                let pointer = pointer.offset_i64(self, offset as i64);
+                match value {
+                    ValueKind::Primitive(value) => {
+                        pointer.store(self, value, MemFlags::trusted());
+                    }
+                    ValueKind::ScalarPair(val1, val2) => {
+                        let layout = self.ty_layout(ty);
+                        let off1 = layout.fields.offset(0).bytes_usize() as i64;
+                        let off2 = layout.fields.offset(1).bytes_usize() as i64;
+                        pointer.offset_i64(self, off1).store(self, val1, MemFlags::trusted());
+                        pointer.offset_i64(self, off2).store(self, val2, MemFlags::trusted());
+                    }
+                    ValueKind::Aggregate { pointer: pointer_from, size } => {
+                        self.translate_mem_copy(pointer, pointer_from, size)
+                    }
                 }
-                ValueKind::ScalarPair(val1, val2) => {
-                    let layout = self.ty_layout(ty);
-                    let off1 = layout.fields.offset(0).bytes_usize() as i32;
-                    let off2 = layout.fields.offset(1).bytes_usize() as i32;
-                    self.builder.ins().stack_store(val1, dest, offset + dest_offset + off1);
-                    self.builder.ins().stack_store(val2, dest, offset + dest_offset + off2);
-                }
-                ValueKind::Aggregate { slot, offset: src_offset, size } => {
-                    let dest = MemSlot::Stack(dest);
-                    self.translate_mem_copy(dest, dest_offset + offset, slot, src_offset, size)
-                }
-            },
-            PlaceKind::Mem(dest, dest_offset) => match value {
-                ValueKind::Primitive(value) => {
-                    self.builder.ins().store(
-                        MemFlags::trusted(),
-                        value,
-                        dest,
-                        offset + dest_offset,
-                    );
-                }
-                ValueKind::ScalarPair(_val1, _val2) => {
-                    panic!("unsupported mem store of scalar pair")
-                }
-                ValueKind::Aggregate { slot, offset: src_offset, size } => {
-                    let dest = MemSlot::MemAddr(dest);
-                    self.translate_mem_copy(dest, dest_offset + offset, slot, src_offset, size)
-                }
-            },
-        }
-    }
-
-    fn translate_mem_slot_addr(&mut self, slot: MemSlot, offset: i32) -> Value {
-        match slot {
-            MemSlot::Stack(ss) => {
-                self.builder.ins().stack_addr(self.module.isa().pointer_type(), ss, offset)
-            }
-            MemSlot::MemAddr(addr) if offset == 0 => addr,
-            MemSlot::MemAddr(addr) => {
-                let off =
-                    self.builder.ins().iconst(self.module.isa().pointer_type(), offset as i64);
-                self.builder.ins().iadd(addr, off)
             }
         }
     }
@@ -1175,7 +1131,7 @@ impl<'a> FunctionTranslator<'a> {
                 let ptr_type = self.module.isa().pointer_type();
                 let addr = self.builder.ins().global_value(ptr_type, global);
                 let size = layout.size.bytes_usize() as i32;
-                ValueKind::Aggregate { slot: MemSlot::MemAddr(addr), offset: 0, size }
+                ValueKind::Aggregate { pointer: Pointer::new(addr), size }
             }
             _ => panic!("unsupported abi for const: {:?}", layout.abi),
         };
@@ -1210,53 +1166,24 @@ impl<'a> FunctionTranslator<'a> {
                 assert!(matches!(abi, Abi::ScalarPair(..)));
                 ValueKind::ScalarPair(var1_val, var2_val)
             }
-            PlaceKind::Stack(slot, off) => {
-                self.translate_mem_slot_load(MemSlot::Stack(slot), off, ty.clone())
-            }
-            PlaceKind::Mem(addr, off) => {
-                self.translate_mem_slot_load(MemSlot::MemAddr(addr), off, ty.clone())
-            }
+            PlaceKind::Addr(ptr, _) => self.translate_mem_slot_load(ptr, ty.clone()),
         };
         (val, ty)
     }
 
-    fn translate_mem_slot_load(&mut self, mem_slot: MemSlot, offset: i32, ty: Ty) -> ValueKind {
+    fn translate_mem_slot_load(&mut self, pointer: Pointer, ty: Ty) -> ValueKind {
         let layout = self.ty_layout(ty);
         let abi = layout.abi;
-        match mem_slot {
-            MemSlot::Stack(slot) => match abi {
-                Abi::Scalar(scalar) => {
-                    let loaded_val = self.builder.ins().stack_load(
-                        translate_scalar_type(scalar, self.module.isa()),
-                        slot,
-                        offset,
-                    );
-                    ValueKind::Primitive(loaded_val)
-                }
-                Abi::Aggregate { sized: true } => ValueKind::Aggregate {
-                    slot: MemSlot::Stack(slot),
-                    offset,
-                    size: layout.size.bytes_usize() as i32,
-                },
-                _ => panic!("unsupported abi for var copy from stack: {:?}", abi),
-            },
-            MemSlot::MemAddr(addr) => match abi {
-                Abi::Scalar(scalar) => {
-                    let loaded_val = self.builder.ins().load(
-                        translate_scalar_type(scalar, self.module.isa()),
-                        MemFlags::trusted(),
-                        addr,
-                        offset,
-                    );
-                    ValueKind::Primitive(loaded_val)
-                }
-                Abi::Aggregate { sized: true } => ValueKind::Aggregate {
-                    slot: MemSlot::MemAddr(addr),
-                    offset,
-                    size: layout.size.bytes_usize() as i32,
-                },
-                _ => panic!("unsupported abi for var copy from mem: {:?}", abi),
-            },
+        match abi {
+            Abi::Scalar(scalar) => {
+                let typ = translate_scalar_type(scalar, self.module.isa());
+                let loaded_val = pointer.load(self, typ, MemFlags::trusted());
+                ValueKind::Primitive(loaded_val)
+            }
+            Abi::Aggregate { sized: true } => {
+                ValueKind::Aggregate { pointer, size: layout.size.bytes_usize() as i32 }
+            }
+            _ => panic!("unsupported abi for var copy: {:?}", abi),
         }
     }
 
@@ -1316,17 +1243,10 @@ impl<'a> FunctionTranslator<'a> {
         self.db.layout_of_ty(ty, self.env.clone()).expect("failed layout")
     }
 
-    fn translate_mem_copy(
-        &mut self,
-        dest: MemSlot,
-        dest_offset: i32,
-        slot: MemSlot,
-        offset: i32,
-        size: i32,
-    ) {
+    fn translate_mem_copy(&mut self, dest: Pointer, src: Pointer, size: i32) {
         let config = self.module.target_config();
-        let dest = self.translate_mem_slot_addr(dest, dest_offset);
-        let src = self.translate_mem_slot_addr(slot, offset);
+        let dest = dest.get_addr(self);
+        let src = src.get_addr(self);
         self.builder.emit_small_memory_copy(
             config,
             dest,
@@ -1442,11 +1362,8 @@ impl<'a> FunctionTranslator<'a> {
                 assert!(tag_offset == 0);
                 self.builder.use_var(var1)
             }
-            PlaceKind::Stack(ss, off) => {
-                self.builder.ins().stack_load(tag_typ, ss, off + tag_offset)
-            }
-            PlaceKind::Mem(mem, off) => {
-                self.builder.ins().load(tag_typ, MemFlags::trusted(), mem, off + tag_offset)
+            PlaceKind::Addr(pointer, _) => {
+                pointer.offset_i64(self, tag_offset as i64).load(self, tag_typ, MemFlags::trusted())
             }
         };
         let mut tag = match tag_encoding {
