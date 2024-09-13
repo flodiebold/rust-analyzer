@@ -796,7 +796,7 @@ impl<'a> FunctionTranslator<'a> {
                 self.builder.ins().nop();
                 return;
             }
-            Rvalue::Len(_) => panic!("unsupported len rvalue"),
+            Rvalue::Len(place) => self.translate_array_len(place),
             Rvalue::ShallowInitBox(_, _) => panic!("unsupported ShallowInitBox"),
             Rvalue::ShallowInitBoxWithAlloc(_) => panic!("unsupported ShallowInitBoxWithAlloc"),
             Rvalue::CopyForDeref(_) => panic!("unsupported CopyForDeref"),
@@ -1525,6 +1525,18 @@ impl<'a> FunctionTranslator<'a> {
                 }
                 &variants[rustc_enum_variant_idx]
             }
+        }
+    }
+
+    fn translate_array_len(&mut self, place: &Place) -> ValueKind {
+        let (place_kind, ty) = self.translate_place_with_ty(place);
+        match ty.kind(Interner) {
+            TyKind::Array(_, len) => self.translate_const(len).0,
+            TyKind::Slice(_) => {
+                dbg!(place_kind);
+                todo!()
+            }
+            _ => panic!("calling array len for non-array/slice {:?}", ty),
         }
     }
 }
