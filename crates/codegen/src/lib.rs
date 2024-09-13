@@ -246,7 +246,7 @@ enum PlaceKind {
 enum ValueKind {
     Primitive(Value),
     ScalarPair(Value, Value),
-    Aggregate { pointer: Pointer, size: i32 },
+    Aggregate(Pointer, Option<Value>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -490,17 +490,22 @@ impl<'a> FunctionTranslator<'a> {
                 let args: Vec<_> = args
                     .iter()
                     .flat_map(|a| {
-                        let v = self.translate_operand(a);
+                        let (v, ty) = self.translate_operand_with_ty(a);
+                        let layout = self.ty_layout(ty);
+                        let size = layout.size.bytes_usize();
                         // FIXME is this correct?
                         match v {
                             ValueKind::Primitive(val) => [val].to_vec(),
                             ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
-                            ValueKind::Aggregate { pointer, size } => {
+                            ValueKind::Aggregate(pointer, None) => {
                                 if size == 0 {
                                     Vec::new()
                                 } else {
                                     [pointer.get_addr(self)].to_vec()
                                 }
+                            }
+                            ValueKind::Aggregate(_pointer, Some(_meta)) => {
+                                panic!("unsupported unsized param")
                             }
                         }
                     })
@@ -576,9 +581,8 @@ impl<'a> FunctionTranslator<'a> {
                         panic!("unsupported unsized return")
                     }
                     assert_eq!(results.len(), 1);
-                    let size = ret_ty_layout.size.bytes_usize() as i32;
                     let pointer = Pointer::new(results[0]);
-                    ValueKind::Aggregate { pointer, size }
+                    ValueKind::Aggregate(pointer, None)
                 }
                 Abi::Vector { .. } => panic!("unsupported vector return"),
             };
@@ -594,10 +598,13 @@ impl<'a> FunctionTranslator<'a> {
             _ => match self.translate_copy_local_with_projection(return_slot(), &[]).0 {
                 ValueKind::Primitive(val) => [val].to_vec(),
                 ValueKind::ScalarPair(val1, val2) => [val1, val2].to_vec(),
-                ValueKind::Aggregate { pointer, size: _ } => {
+                ValueKind::Aggregate(pointer, None) => {
                     // FIXME: is this correct ABI-wise?
                     let addr = pointer.get_addr(self);
                     [addr].to_vec()
+                }
+                ValueKind::Aggregate(_pointer, Some(_meta)) => {
+                    panic!("unsupported unsized return")
                 }
             },
         };
@@ -996,8 +1003,13 @@ impl<'a> FunctionTranslator<'a> {
                         pointer.offset_i64(self, off1).store(self, val1, MemFlags::trusted());
                         pointer.offset_i64(self, off2).store(self, val2, MemFlags::trusted());
                     }
-                    ValueKind::Aggregate { pointer: pointer_from, size } => {
+                    ValueKind::Aggregate(pointer_from, None) => {
+                        let layout = self.ty_layout(ty);
+                        let size = layout.size.bytes_usize() as i32;
                         self.translate_mem_copy(pointer, pointer_from, size)
+                    }
+                    ValueKind::Aggregate(_pointer_from, Some(_meta)) => {
+                        panic!("unimplemented store from unsized value")
                     }
                 }
             }
@@ -1130,8 +1142,7 @@ impl<'a> FunctionTranslator<'a> {
                 let global = self.module.declare_data_in_func(data, &mut self.builder.func);
                 let ptr_type = self.module.isa().pointer_type();
                 let addr = self.builder.ins().global_value(ptr_type, global);
-                let size = layout.size.bytes_usize() as i32;
-                ValueKind::Aggregate { pointer: Pointer::new(addr), size }
+                ValueKind::Aggregate(Pointer::new(addr), None)
             }
             _ => panic!("unsupported abi for const: {:?}", layout.abi),
         };
@@ -1180,9 +1191,7 @@ impl<'a> FunctionTranslator<'a> {
                 let loaded_val = pointer.load(self, typ, MemFlags::trusted());
                 ValueKind::Primitive(loaded_val)
             }
-            Abi::Aggregate { sized: true } => {
-                ValueKind::Aggregate { pointer, size: layout.size.bytes_usize() as i32 }
-            }
+            Abi::Aggregate { sized: true } => ValueKind::Aggregate(pointer, None),
             _ => panic!("unsupported abi for var copy: {:?}", abi),
         }
     }
