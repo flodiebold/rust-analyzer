@@ -902,7 +902,7 @@ fn test() -> i32 {
 fn test_match_len() {
     check_i32(
         r#"
-//- minicore: index, slice, coerce_unsized
+//- minicore: index, slice, coerce_unsized, add, builtin_impls
 fn test() -> i32 {
     let a = &[10i32, 20, 12] as &[_];
     match a {

@@ -15,7 +15,7 @@ use base_db::{impl_intern_key, salsa::InternKey, Upcast};
 use cranelift::{
     codegen::{
         self,
-        ir::{GlobalValue, StackSlot},
+        ir::{immediates::Offset32, GlobalValue, StackSlot},
     },
     frontend::Switch,
     prelude::{
@@ -29,7 +29,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Module};
 use either::Either;
 use hir_def::{
-    layout::{Abi, Scalar, TagEncoding},
+    layout::{Abi, Scalar, TagEncoding, TargetDataLayout},
     CallableDefId, FunctionId, LocalFieldId, Lookup, StaticId, VariantId,
 };
 use hir_ty::{
@@ -848,11 +848,16 @@ impl<'a> FunctionTranslator<'a> {
         for elem in projection {
             match elem {
                 ProjectionElem::Deref => {
-                    ty = ty.as_reference_or_ptr().expect("non-ptr deref target").0.clone();
-                    let addr =
-                        self.translate_load_pointer_value(kind, self.module.isa().pointer_type());
-                    // FIXME load metadata here
-                    kind = PlaceKind::Addr(Pointer::new(addr), None);
+                    let derefed_ty =
+                        ty.as_reference_or_ptr().expect("non-ptr deref target").0.clone();
+                    if has_ptr_meta(self.db.upcast(), derefed_ty.clone()) {
+                        let (addr, meta) = self.load_scalar_pair(kind, ty.clone());
+                        kind = PlaceKind::Addr(Pointer::new(addr), Some(meta))
+                    } else {
+                        let addr = self.load_scalar(kind, ty.clone());
+                        kind = PlaceKind::Addr(Pointer::new(addr), None);
+                    }
+                    ty = derefed_ty;
                 }
                 ProjectionElem::Index(idx) => {
                     let idx =
@@ -910,13 +915,34 @@ impl<'a> FunctionTranslator<'a> {
                         }
                     }
                 }
+                ProjectionElem::ConstantIndex { offset, from_end } => {
+                    if *from_end {
+                        panic!("unimplemented ConstantIndex from_end");
+                    }
+                    let ptr = self.place_kind_ptr(kind);
+                    ty = match ty.kind(Interner) {
+                        TyKind::Array(elem_ty, _size) => elem_ty.clone(),
+                        TyKind::Slice(elem_ty) => elem_ty.clone(),
+                        _ => panic!("can't index ty: {:?}", ty),
+                    };
+                    let layout = self.ty_layout(ty.clone());
+                    let idx_offset = *offset * layout.size.bytes();
+                    kind = PlaceKind::Addr(ptr.offset_i64(self, idx_offset as i64), None);
+                }
                 ProjectionElem::ClosureField(_) => panic!("unsupported closure field"),
-                ProjectionElem::ConstantIndex { .. } => panic!("unsupported constant index"),
                 ProjectionElem::Subslice { .. } => panic!("unsupported subslice"),
                 ProjectionElem::OpaqueCast(_) => panic!("unsupported opaque cast"),
             }
         }
         (kind, ty)
+    }
+
+    fn place_kind_ptr(&mut self, kind: PlaceKind) -> Pointer {
+        match kind {
+            PlaceKind::Variable(_) => panic!("trying to take ptr of variable"),
+            PlaceKind::VariablePair(_, _) => panic!("trying to take ptr of variable pair"),
+            PlaceKind::Addr(pointer, _) => pointer,
+        }
     }
 
     fn translate_place_kind_addr(&mut self, kind: PlaceKind) -> Value {
@@ -927,13 +953,52 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn translate_load_pointer_value(&mut self, kind: PlaceKind, typ: Type) -> Value {
+    fn load_scalar(&mut self, kind: PlaceKind, ty: Ty) -> Value {
         match kind {
             PlaceKind::Variable(var) => self.builder.use_var(var),
             PlaceKind::VariablePair(var1, _) => self.builder.use_var(var1),
-            PlaceKind::Addr(pointer, _) => pointer.load(self, typ, MemFlags::trusted()),
+            PlaceKind::Addr(pointer, None) => {
+                let layout = self.ty_layout(ty.clone());
+                let clif_ty = match layout.abi {
+                    Abi::Scalar(scalar) => translate_scalar_type(scalar, self.module.isa()),
+                    Abi::Vector { element, count } => {
+                        translate_scalar_type(element, self.module.isa())
+                            .by(u32::try_from(count).unwrap())
+                            .unwrap()
+                    }
+                    _ => unreachable!("{:?}", ty),
+                };
+                pointer.load(self, clif_ty, MemFlags::trusted())
+            }
+            PlaceKind::Addr(_pointer, Some(_)) => panic!("load_scalar on unsized place"),
         }
     }
+
+    fn load_scalar_pair(&mut self, kind: PlaceKind, ty: Ty) -> (Value, Value) {
+        match kind {
+            PlaceKind::Variable(_) => panic!("load_scalar_pair on single variable"),
+            PlaceKind::VariablePair(var1, var2) => {
+                (self.builder.use_var(var1), self.builder.use_var(var2))
+            }
+            PlaceKind::Addr(pointer, None) => {
+                let layout = self.ty_layout(ty);
+                let (a_scalar, b_scalar) = match layout.abi {
+                    Abi::ScalarPair(a, b) => (a, b),
+                    _ => unreachable!("load_scalar_pair({:?})", layout.abi),
+                };
+                let tdl = self.db.target_data_layout(self.env.krate).unwrap();
+                let b_offset = scalar_pair_calculate_b_offset(&tdl, a_scalar, b_scalar);
+                let clif_ty1 = translate_scalar_type(a_scalar, self.module.isa());
+                let clif_ty2 = translate_scalar_type(b_scalar, self.module.isa());
+                let flags = MemFlags::trusted();
+                let val1 = pointer.load(self, clif_ty1, flags);
+                let val2 = pointer.offset(self, b_offset).load(self, clif_ty2, flags);
+                (val1, val2)
+            }
+            PlaceKind::Addr(_pointer, Some(_)) => panic!("load_scalar_pair on unsized place"),
+        }
+    }
+
     fn translate_place_store(&mut self, place: &Place, value: ValueKind) {
         let (kind, ty) = self.translate_place_with_ty(place);
         self.translate_place_kind_store_with_offset(kind, ty, 0, value)
@@ -1019,6 +1084,7 @@ impl<'a> FunctionTranslator<'a> {
     fn get_variable(&mut self, local: LocalId) -> LocalKind {
         let typ = self.body.locals[local].ty.clone();
         let variable = *self.variables.entry(local).or_insert_with(|| {
+            eprintln!("local {:?} ty {:?}", local, typ);
             // FIXME error handling here!
             let layout = self
                 .db
@@ -1459,8 +1525,11 @@ impl<'a> FunctionTranslator<'a> {
         match ty.kind(Interner) {
             TyKind::Array(_, len) => self.translate_const(len).0,
             TyKind::Slice(_) => {
-                dbg!(place_kind);
-                todo!()
+                let meta = match place_kind {
+                    PlaceKind::Addr(_, Some(meta)) => meta,
+                    _ => panic!("slice is not unsized: {:?}", place_kind),
+                };
+                ValueKind::Primitive(meta)
             }
             _ => panic!("calling array len for non-array/slice {:?}", ty),
         }
@@ -1605,7 +1674,7 @@ fn translate_signature(
 
 fn translate_scalar_type(scalar: Scalar, isa: &dyn TargetIsa) -> Type {
     use hir_def::layout::{AddressSpace, Float, Primitive};
-    let (Scalar::Initialized { value, valid_range: _ } | Scalar::Union { value }) = scalar;
+    let value = scalar.primitive();
     match value {
         Primitive::Int(int, _) => {
             Type::int_with_byte_size(int.size().bytes_usize() as u16).unwrap()
@@ -1649,4 +1718,29 @@ fn get_int_ty(ty: &Ty, isa: &dyn TargetIsa) -> Option<(u8, bool)> {
         ),
         _ => return None,
     })
+}
+
+fn scalar_pair_calculate_b_offset(
+    tdl: &TargetDataLayout,
+    a_scalar: Scalar,
+    b_scalar: Scalar,
+) -> Offset32 {
+    let b_offset = a_scalar.size(tdl).align_to(b_scalar.align(tdl).abi);
+    Offset32::new(b_offset.bytes().try_into().unwrap())
+}
+
+/// Is a pointer to this type a fat ptr?
+pub(crate) fn has_ptr_meta(_db: &dyn HirDatabase, ty: Ty) -> bool {
+    // if ty.is_sized(tcx, ParamEnv::reveal_all()) {
+    //     return false;
+    // }
+
+    // let tail = tcx.struct_tail_for_codegen(ty, ParamEnv::reveal_all());
+    let tail = ty; // FIXME handle this properly
+    match tail.kind(Interner) {
+        TyKind::Foreign(..) => false,
+        TyKind::Str | TyKind::Slice(..) | TyKind::Dyn(..) => true,
+        _ => false,
+        // _ => bug!("unexpected unsized tail: {:?}", tail),
+    }
 }

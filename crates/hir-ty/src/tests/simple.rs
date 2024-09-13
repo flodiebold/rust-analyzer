@@ -3719,27 +3719,3 @@ fn test() -> bool {
         "#]],
     );
 }
-
-#[test]
-fn infer_test() {
-    check_infer(
-        r#"
-//- minicore: add
-struct Foo {
-  a: i64,
-  b: i64,
-  c: i32,
-}
-fn test() -> i32 {
-    let foo = Foo {
-        a: 1,
-        b: 2,
-        c: 2,
-    };
-    foo.a as i32 + foo.b as i32 + foo.c
-}
-"#,
-        expect![[r#"
-        "#]],
-    );
-}
