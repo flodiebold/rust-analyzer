@@ -917,3 +917,21 @@ fn test() -> i32 {
         42,
     )
 }
+
+#[test]
+fn test_union() {
+    check_i32(
+        r#"
+union Foo {
+    x: [u8; 4],
+    y: i32,
+}
+
+fn test() -> i32 {
+    let f = Foo { x: [42, 0, 0, 0] };
+    unsafe { f.y }
+}
+"#,
+        42,
+    )
+}

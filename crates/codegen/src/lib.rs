@@ -181,7 +181,7 @@ impl Jit {
         translator.builder.seal_all_blocks(); // FIXME do this better?
         translator.builder.finalize();
 
-        eprintln!("{}", self.ctx.func);
+        // eprintln!("{}", self.ctx.func);
 
         let id = self
             .module
@@ -1084,7 +1084,6 @@ impl<'a> FunctionTranslator<'a> {
     fn get_variable(&mut self, local: LocalId) -> LocalKind {
         let typ = self.body.locals[local].ty.clone();
         let variable = *self.variables.entry(local).or_insert_with(|| {
-            eprintln!("local {:?} ty {:?}", local, typ);
             // FIXME error handling here!
             let layout = self
                 .db
