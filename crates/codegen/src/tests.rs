@@ -723,7 +723,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_trait_call() {
     check_i32(
         r#"
@@ -743,7 +742,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn test_trait_call_2() {
     check_i32(
         r#"
@@ -752,7 +750,7 @@ trait Foo {
 }
 struct Bar(i32);
 impl Foo for Bar {
-    fn foo(&self) -> i32 { self.0 }
+    fn foo(self) -> i32 { self.0 }
 }
 fn test() -> i32 {
     Bar(42).foo()

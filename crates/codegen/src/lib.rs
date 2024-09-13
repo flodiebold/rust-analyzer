@@ -516,8 +516,10 @@ impl<'a> FunctionTranslator<'a> {
                         self.translate_rust_intrinsic_call(func_id, subst, &args, destination);
                     }
                     Some((_abi, CallableDefId::FunctionId(func_id), subst)) => {
+                        let (func, subst) =
+                            self.db.lookup_impl_method(self.env.clone(), func_id, subst.clone());
                         let mono_func_id =
-                            self.db.intern_mono_function(MonoFunction { func: func_id, subst });
+                            self.db.intern_mono_function(MonoFunction { func, subst });
                         let shim = self.get_shim(mono_func_id);
                         let func_ref =
                             self.module.declare_func_in_func(shim, &mut self.builder.func);
@@ -704,10 +706,13 @@ impl<'a> FunctionTranslator<'a> {
                         let callable_def = self.db.lookup_intern_callable_def((*fn_id).into());
                         let func_ref = match callable_def {
                             CallableDefId::FunctionId(func) => {
-                                let mono_func_id = self.db.intern_mono_function(MonoFunction {
+                                let (func, subst) = self.db.lookup_impl_method(
+                                    self.env.clone(),
                                     func,
-                                    subst: subst.clone(),
-                                });
+                                    subst.clone(),
+                                );
+                                let mono_func_id =
+                                    self.db.intern_mono_function(MonoFunction { func, subst });
                                 let shim = self.get_shim(mono_func_id);
                                 let func_ref =
                                     self.module.declare_func_in_func(shim, &mut self.builder.func);
