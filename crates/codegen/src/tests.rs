@@ -933,3 +933,23 @@ fn test() -> i32 {
         42,
     )
 }
+
+#[test]
+fn unix_write_stdout() {
+    check_i32(
+        r#"
+//- minicore: slice, index, coerce_unsized
+
+extern "C" {
+    pub fn write(fd: i32, buf: *const u8, count: usize) -> usize;
+}
+
+fn test() -> i32 {
+    let stdout = b"stdout\n";
+    let result = write(1, &stdout[0], 7);
+    result as i32
+}
+        "#,
+        7,
+    );
+}

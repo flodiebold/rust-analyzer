@@ -26,7 +26,7 @@ use cranelift::{
     },
 };
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{DataDescription, DataId, FuncId, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use either::Either;
 use hir_def::{
     layout::{Abi, Scalar, TagEncoding, TargetDataLayout},
@@ -515,6 +515,26 @@ impl<'a> FunctionTranslator<'a> {
                     Some((FnAbi::RustIntrinsic, CallableDefId::FunctionId(func_id), subst)) => {
                         self.translate_rust_intrinsic_call(func_id, subst, &args, destination);
                     }
+                    Some((_abi, CallableDefId::FunctionId(func_id), subst))
+                        if is_extern_func(self.db, func_id) =>
+                    {
+                        let sig = self
+                            .db
+                            .callable_item_signature(func_id.into())
+                            .substitute(Interner, &subst);
+                        let data = self.db.function_data(func_id);
+                        // TODO calling convention.....
+                        let sig = translate_signature(&sig, self.module.isa(), self.db, &self.env);
+                        let func = self
+                            .module
+                            .declare_function(&data.name.as_str(), Linkage::Import, &sig)
+                            .expect("failed to declare function");
+                        let func_ref =
+                            self.module.declare_func_in_func(func, &mut self.builder.func);
+                        let call = self.builder.ins().call(func_ref, &args);
+                        let results = self.builder.inst_results(call).to_vec();
+                        self.store_func_call_return(&results, destination);
+                    }
                     Some((_abi, CallableDefId::FunctionId(func_id), subst)) => {
                         let (func, subst) =
                             self.db.lookup_impl_method(self.env.clone(), func_id, subst.clone());
@@ -705,6 +725,9 @@ impl<'a> FunctionTranslator<'a> {
                         };
                         let callable_def = self.db.lookup_intern_callable_def((*fn_id).into());
                         let func_ref = match callable_def {
+                            CallableDefId::FunctionId(func) if is_extern_func(self.db, func) => {
+                                panic!("unimplemented reify of extern func")
+                            }
                             CallableDefId::FunctionId(func) => {
                                 let (func, subst) = self.db.lookup_impl_method(
                                     self.env.clone(),
@@ -1540,6 +1563,11 @@ impl<'a> FunctionTranslator<'a> {
     }
 }
 
+fn is_extern_func(db: &dyn CodegenDatabase, func_id: FunctionId) -> bool {
+    let parent = func_id.lookup(db.upcast()).container;
+    matches!(parent, hir_def::ItemContainerId::ExternBlockId(_))
+}
+
 fn const_to_int(n: &Const) -> u64 {
     let ConstValue::Concrete(c) = &n.data(Interner).value else { panic!("non-concrete const") };
     let hir_ty::ConstScalar::Bytes(bytes, mm) = &c.interned else {
@@ -1592,7 +1620,7 @@ fn find_referenced_locals(body: &MirBody) -> FxHashSet<LocalId> {
 
 fn bytes_to_imm64(bytes: &[u8]) -> Imm64 {
     let mut data: [u8; 8] = [0; 8];
-    data[0..bytes.len()].copy_from_slice(&bytes);
+    data[0..bytes.len().min(8)].copy_from_slice(&bytes[0..bytes.len().min(8)]);
     Imm64::new(i64::from_le_bytes(data))
 }
 
@@ -1635,8 +1663,10 @@ fn translate_signature(
 ) -> Signature {
     let call_conv = match sig.abi() {
         hir_ty::FnAbi::Rust => CallConv::Fast,
+        hir_ty::FnAbi::C => isa.default_call_conv(),
         _ => panic!("unsupported ABI: {:?}", sig.abi()),
     };
+    // TODO handle C abi better
     let mut signature = Signature::new(call_conv);
     signature.params.extend(
         sig.params()
