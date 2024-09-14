@@ -984,3 +984,19 @@ fn test() -> i32 {
         42,
     );
 }
+
+#[test]
+fn expose_address() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let i = 42i32;
+    let r = &i as *const i32;
+    let n = r as usize;
+    let r2 = n as *const i32;
+    unsafe { *r2 }
+}
+        "#,
+        42,
+    );
+}

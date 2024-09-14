@@ -692,10 +692,7 @@ impl<'a> FunctionTranslator<'a> {
                         };
                         let value = value.assert_primitive();
                         let cast_value = match (from_sz.cmp(&to_sz), from_sign, to_sign) {
-                            (Ordering::Greater, _, _) => {
-                                // FIXME is this correct for signed reductions?
-                                self.builder.ins().ireduce(to_typ, value)
-                            }
+                            (Ordering::Greater, _, _) => self.builder.ins().ireduce(to_typ, value),
                             (Ordering::Less, false, _) => self.builder.ins().uextend(to_typ, value),
                             (Ordering::Less, true, _) => self.builder.ins().sextend(to_typ, value),
                             (Ordering::Equal, _, _) => value,
@@ -801,9 +798,23 @@ impl<'a> FunctionTranslator<'a> {
                         let addr = self.builder.ins().func_addr(ptr_typ, func_ref);
                         ValueKind::Primitive(addr)
                     }
+                    CastKind::PointerExposeAddress | CastKind::PointerFromExposedAddress => {
+                        let to_typ = match &to_layout.abi {
+                            Abi::Scalar(scalar) => {
+                                translate_scalar_type(*scalar, self.module.isa())
+                            }
+                            _ => panic!("int with non-scalar abi"),
+                        };
+                        // TODO what about fat pointers
+                        let value = value.assert_primitive();
+                        let cast_value = match self.pointer_type.bytes().cmp(&to_typ.bytes()) {
+                            Ordering::Less => self.builder.ins().uextend(to_typ, value),
+                            Ordering::Equal => value,
+                            Ordering::Greater => self.builder.ins().ireduce(to_typ, value),
+                        };
+                        ValueKind::Primitive(cast_value)
+                    }
                     CastKind::Pointer(ClosureFnPointer(_)) => panic!("unimplemented closure cast"),
-                    CastKind::PointerExposeAddress => panic!("unimplemented pointer cast"),
-                    CastKind::PointerFromExposedAddress => panic!("unimplemented pointer cast"),
                     CastKind::DynStar => panic!("unimplemented dyn*"),
                     CastKind::FnPtrToPtr => panic!("unimplemented fn ptr cast"),
                 }
