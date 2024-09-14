@@ -953,3 +953,19 @@ fn test() -> i32 {
         7,
     );
 }
+
+#[test]
+fn float_ops() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let i = 20i32;
+    let mut f: f32 = i as f32 * 1.5;
+    f = f + 12f32;
+    let g = f as i32;
+    g
+}
+        "#,
+        42,
+    );
+}

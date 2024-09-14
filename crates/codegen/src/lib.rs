@@ -20,7 +20,7 @@ use cranelift::{
     frontend::Switch,
     prelude::{
         isa::{CallConv, TargetIsa},
-        settings, types, AbiParam, Block, Configurable, EntityRef, FunctionBuilder,
+        settings, types, AbiParam, Block, Configurable, EntityRef, FloatCC, FunctionBuilder,
         FunctionBuilderContext, Imm64, InstBuilder, IntCC, MemFlags, Signature, StackSlotData,
         TrapCode, Type, Value, Variable,
     },
@@ -702,6 +702,38 @@ impl<'a> FunctionTranslator<'a> {
                         };
                         ValueKind::Primitive(cast_value)
                     }
+                    CastKind::IntToFloat => {
+                        let (_, from_sign) = get_int_ty(&from_ty, self.module.isa()).expect("int");
+                        let to_typ = match &to_layout.abi {
+                            Abi::Scalar(scalar) => {
+                                translate_scalar_type(*scalar, self.module.isa())
+                            }
+                            _ => panic!("float with non-scalar abi"),
+                        };
+                        let value = value.assert_primitive();
+                        let cast_value = if from_sign {
+                            self.builder.ins().fcvt_from_sint(to_typ, value)
+                        } else {
+                            self.builder.ins().fcvt_from_uint(to_typ, value)
+                        };
+                        ValueKind::Primitive(cast_value)
+                    }
+                    CastKind::FloatToInt => {
+                        let (_, to_sign) = get_int_ty(&to_ty, self.module.isa()).expect("int");
+                        let to_typ = match &to_layout.abi {
+                            Abi::Scalar(scalar) => {
+                                translate_scalar_type(*scalar, self.module.isa())
+                            }
+                            _ => panic!("int with non-scalar abi"),
+                        };
+                        let value = value.assert_primitive();
+                        let cast_value = if to_sign {
+                            self.builder.ins().fcvt_to_sint(to_typ, value)
+                        } else {
+                            self.builder.ins().fcvt_to_uint(to_typ, value)
+                        };
+                        ValueKind::Primitive(cast_value)
+                    }
                     CastKind::Pointer(UnsafeFnPointer | MutToConstPointer | ArrayToPointer) => {
                         // nothing to do here
                         value
@@ -1199,14 +1231,41 @@ impl<'a> FunctionTranslator<'a> {
             Abi::Uninhabited => unreachable!(),
             Abi::Scalar(scalar) => {
                 let typ = translate_scalar_type(scalar, self.module.isa());
-                let val = bytes_to_imm64(bytes);
-                let val = if is_ref {
-                    let addr = memory_addr.expect("ref const without memory");
-                    self.builder.ins().iadd_imm(addr, val)
+                if typ.is_float() {
+                    let val = match typ.bytes() {
+                        2 => panic!("unimplemented f16 constant"),
+                        4 => {
+                            let mut data: [u8; 4] = [0; 4];
+                            data[0..bytes.len()].copy_from_slice(&bytes[0..bytes.len()]);
+                            let val = f32::from_ne_bytes(data);
+                            self.builder.ins().f32const(val)
+                        }
+                        8 => {
+                            let mut data: [u8; 8] = [0; 8];
+                            data[0..bytes.len()].copy_from_slice(&bytes[0..bytes.len()]);
+                            let val = f64::from_ne_bytes(data);
+                            self.builder.ins().f64const(val)
+                        }
+                        16 => {
+                            panic!("unimplemented f128 constant");
+                            // let mut data: [u8; 16] = [0; 16];
+                            // data[0..bytes.len()].copy_from_slice(&bytes[0..bytes.len()]);
+                            // let val = f128::from_ne_bytes(data);
+                            // self.builder.ins().f128const(val)
+                        }
+                        _ => unreachable!("{:?}", typ),
+                    };
+                    ValueKind::Primitive(val)
                 } else {
-                    self.builder.ins().iconst(typ, val)
-                };
-                ValueKind::Primitive(val)
+                    let val = bytes_to_imm64(bytes);
+                    let val = if is_ref {
+                        let addr = memory_addr.expect("ref const without memory");
+                        self.builder.ins().iadd_imm(addr, val)
+                    } else {
+                        self.builder.ins().iconst(typ, val)
+                    };
+                    ValueKind::Primitive(val)
+                }
             }
             Abi::ScalarPair(s1, s2) => {
                 let typ1 = translate_scalar_type(s1, self.module.isa());
@@ -1299,43 +1358,72 @@ impl<'a> FunctionTranslator<'a> {
         let (right, _) = self.translate_operand_with_ty(right);
         let left = left.assert_primitive();
         let right = right.assert_primitive();
-        let signed = match ty1.kind(Interner) {
-            TyKind::Scalar(hir_ty::Scalar::Int(_)) => true,
-            TyKind::Scalar(hir_ty::Scalar::Uint(_)) => false,
-            _ => true,
+        let (float, signed) = match ty1.kind(Interner) {
+            TyKind::Scalar(hir_ty::Scalar::Int(_)) => (false, true),
+            TyKind::Scalar(hir_ty::Scalar::Uint(_)) => (false, false),
+            TyKind::Scalar(hir_ty::Scalar::Float(_)) => (true, true),
+            _ => panic!("unsupported type for binop: {:?}", ty1),
         };
-        let result = match binop {
-            // FIXME checked?
-            BinOp::Add => self.builder.ins().iadd(left, right),
-            BinOp::Sub => self.builder.ins().isub(left, right),
-            BinOp::Mul => self.builder.ins().imul(left, right),
-            BinOp::Div if signed => self.builder.ins().sdiv(left, right),
-            BinOp::Div => self.builder.ins().udiv(left, right),
-            BinOp::Rem if signed => self.builder.ins().srem(left, right),
-            BinOp::Rem => self.builder.ins().urem(left, right),
+        let result = if !float {
+            match binop {
+                // FIXME checked?
+                BinOp::Add => self.builder.ins().iadd(left, right),
+                BinOp::Sub => self.builder.ins().isub(left, right),
+                BinOp::Mul => self.builder.ins().imul(left, right),
+                BinOp::Div if signed => self.builder.ins().sdiv(left, right),
+                BinOp::Div => self.builder.ins().udiv(left, right),
+                BinOp::Rem if signed => self.builder.ins().srem(left, right),
+                BinOp::Rem => self.builder.ins().urem(left, right),
 
-            BinOp::Eq => self.builder.ins().icmp(IntCC::Equal, left, right),
-            BinOp::Ne => self.builder.ins().icmp(IntCC::NotEqual, left, right),
-            BinOp::Lt if signed => self.builder.ins().icmp(IntCC::SignedLessThan, left, right),
-            BinOp::Le if signed => {
-                self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right)
-            }
-            BinOp::Gt if signed => self.builder.ins().icmp(IntCC::SignedGreaterThan, left, right),
-            BinOp::Ge if signed => {
-                self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right)
-            }
-            BinOp::Lt => self.builder.ins().icmp(IntCC::UnsignedLessThan, left, right),
-            BinOp::Le => self.builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, left, right),
-            BinOp::Gt => self.builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right),
-            BinOp::Ge => self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, left, right),
+                BinOp::Eq => self.builder.ins().icmp(IntCC::Equal, left, right),
+                BinOp::Ne => self.builder.ins().icmp(IntCC::NotEqual, left, right),
+                BinOp::Lt if signed => self.builder.ins().icmp(IntCC::SignedLessThan, left, right),
+                BinOp::Le if signed => {
+                    self.builder.ins().icmp(IntCC::SignedLessThanOrEqual, left, right)
+                }
+                BinOp::Gt if signed => {
+                    self.builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
+                }
+                BinOp::Ge if signed => {
+                    self.builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, left, right)
+                }
+                BinOp::Lt => self.builder.ins().icmp(IntCC::UnsignedLessThan, left, right),
+                BinOp::Le => self.builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, left, right),
+                BinOp::Gt => self.builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right),
+                BinOp::Ge => {
+                    self.builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, left, right)
+                }
 
-            BinOp::BitXor => self.builder.ins().bxor(left, right),
-            BinOp::BitAnd => self.builder.ins().band(left, right),
-            BinOp::BitOr => self.builder.ins().bor(left, right),
-            BinOp::Shl => self.builder.ins().ishl(left, right),
-            BinOp::Shr if signed => self.builder.ins().sshr(left, right),
-            BinOp::Shr => self.builder.ins().ushr(left, right),
-            BinOp::Offset => panic!("unsupported binop: offset"),
+                BinOp::BitXor => self.builder.ins().bxor(left, right),
+                BinOp::BitAnd => self.builder.ins().band(left, right),
+                BinOp::BitOr => self.builder.ins().bor(left, right),
+                BinOp::Shl => self.builder.ins().ishl(left, right),
+                BinOp::Shr if signed => self.builder.ins().sshr(left, right),
+                BinOp::Shr => self.builder.ins().ushr(left, right),
+                BinOp::Offset => panic!("unsupported binop: offset"),
+            }
+        } else {
+            match binop {
+                BinOp::Add => self.builder.ins().fadd(left, right),
+                BinOp::Sub => self.builder.ins().fsub(left, right),
+                BinOp::Mul => self.builder.ins().fmul(left, right),
+                BinOp::Div => self.builder.ins().fdiv(left, right),
+
+                BinOp::Eq => self.builder.ins().fcmp(FloatCC::Equal, left, right),
+                BinOp::Ne => self.builder.ins().fcmp(FloatCC::NotEqual, left, right),
+                BinOp::Lt => self.builder.ins().fcmp(FloatCC::LessThan, left, right),
+                BinOp::Le => self.builder.ins().fcmp(FloatCC::LessThanOrEqual, left, right),
+                BinOp::Gt => self.builder.ins().fcmp(FloatCC::GreaterThan, left, right),
+                BinOp::Ge => self.builder.ins().fcmp(FloatCC::GreaterThanOrEqual, left, right),
+
+                BinOp::BitXor
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::Shl
+                | BinOp::Shr
+                | BinOp::Rem
+                | BinOp::Offset => panic!("bad float binop: {:?}", binop),
+            }
         };
         ValueKind::Primitive(result)
     }
