@@ -734,6 +734,23 @@ impl<'a> FunctionTranslator<'a> {
                         };
                         ValueKind::Primitive(cast_value)
                     }
+                    CastKind::FloatToFloat => {
+                        let from_sz = self.ty_layout(from_ty.clone()).size.bytes_usize();
+                        let to_typ = match &to_layout.abi {
+                            Abi::Scalar(scalar) => {
+                                translate_scalar_type(*scalar, self.module.isa())
+                            }
+                            _ => panic!("float with non-scalar abi"),
+                        };
+                        let to_sz = to_typ.bytes() as usize;
+                        let value = value.assert_primitive();
+                        let cast_value = if from_sz > to_sz {
+                            self.builder.ins().fdemote(to_typ, value)
+                        } else {
+                            self.builder.ins().fpromote(to_typ, value)
+                        };
+                        ValueKind::Primitive(cast_value)
+                    }
                     CastKind::Pointer(UnsafeFnPointer | MutToConstPointer | ArrayToPointer) => {
                         // nothing to do here
                         value
@@ -784,8 +801,11 @@ impl<'a> FunctionTranslator<'a> {
                         let addr = self.builder.ins().func_addr(ptr_typ, func_ref);
                         ValueKind::Primitive(addr)
                     }
-
-                    _ => panic!("unsupported cast: {:?} {:?} {:?}", kind, from_ty, to_ty),
+                    CastKind::Pointer(ClosureFnPointer(_)) => panic!("unimplemented closure cast"),
+                    CastKind::PointerExposeAddress => panic!("unimplemented pointer cast"),
+                    CastKind::PointerFromExposedAddress => panic!("unimplemented pointer cast"),
+                    CastKind::DynStar => panic!("unimplemented dyn*"),
+                    CastKind::FnPtrToPtr => panic!("unimplemented fn ptr cast"),
                 }
             }
             Rvalue::Aggregate(kind, operands) => {

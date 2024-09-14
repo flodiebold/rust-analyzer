@@ -969,3 +969,18 @@ fn test() -> i32 {
         42,
     );
 }
+
+#[test]
+fn float_cast() {
+    check_i32(
+        r#"
+fn test() -> i32 {
+    let f = 42f32;
+    let g = f as f64;
+    let h = g as f32;
+    h as i32
+}
+        "#,
+        42,
+    );
+}
