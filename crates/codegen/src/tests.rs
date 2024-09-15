@@ -1000,3 +1000,122 @@ fn test() -> i32 {
         42,
     );
 }
+
+#[test]
+fn drop() {
+    check_i32(
+        r#"
+//- minicore: drop
+struct Foo<'a>(&'a mut i32);
+impl<'a> Drop for Foo<'a> {
+    fn drop(&mut self) {
+        *self.0 = 42;
+    }
+}
+fn test() -> i32 {
+    let mut x = 0;
+    {
+        let f = Foo(&mut x);
+    }
+    x
+}
+        "#,
+        42,
+    );
+}
+
+#[test]
+fn no_double_drop() {
+    check_i32(
+        r#"
+//- minicore: drop
+struct Foo<'a>(&'a mut i32);
+impl<'a> Drop for Foo<'a> {
+    fn drop(&mut self) {
+        *self.0 = *self.0 + 42;
+    }
+}
+fn test() -> i32 {
+    let mut x = 0;
+    {
+        let f = Foo(&mut x);
+        let g = f;
+    }
+    x
+}
+        "#,
+        42,
+    );
+}
+
+#[test]
+#[ignore]
+fn drop_glue() {
+    check_i32(
+        r#"
+//- minicore: drop
+struct Foo<'a>(&'a mut i32);
+impl<'a> Drop for Foo<'a> {
+    fn drop(&mut self) {
+        *self.0 = 42;
+    }
+}
+struct Bar<'a> { foo: Foo<'a> };
+fn test() -> i32 {
+    let mut x = 0;
+    {
+        let f = Bar { foo: Foo(&mut x) };
+    }
+    x
+}
+        "#,
+        42,
+    );
+}
+
+#[test]
+#[ignore]
+fn test_box() {
+    // TODO wip
+    check_i32(
+        r#"
+//- minicore: drop, sized, phantom_data
+
+#[lang = "owned_box"]
+#[fundamental]
+#[stable(feature = "rust1", since = "1.0.0")]
+pub struct Box<
+    T: ?Sized,
+    A: Allocator = Global,
+>(Unique<T>, A);
+
+impl<T> Box<T> {
+    #[inline(always)]
+    pub fn new(x: T) -> Self {
+        #[rustc_box]
+        Box::new(x)
+    }
+}
+
+#[repr(transparent)]
+pub struct Unique<T: ?Sized> {
+    pointer: NonNull<T>,
+    _marker: PhantomData<T>,
+}
+
+#[repr(transparent)]
+#[rustc_layout_scalar_valid_range_start(1)]
+#[rustc_nonnull_optimization_guaranteed]
+pub struct NonNull<T: ?Sized> {
+    pointer: *const T,
+}
+
+fn test() -> i32 {
+    let mut b = Box::new(0);
+    *b = 42;
+    *b
+}
+        "#,
+        42,
+    );
+}

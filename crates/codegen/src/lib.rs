@@ -1,3 +1,4 @@
+mod drop;
 mod pointer;
 #[cfg(test)]
 mod test_db;
@@ -93,6 +94,7 @@ pub struct Jit {
     compiled_functions: FxHashMap<MonoFunctionId, FuncId>,
     shims: FxHashMap<MonoFunctionId, FuncId>,
     statics: FxHashMap<StaticId, DataId>,
+    drop_in_place_funcs: FxHashMap<Option<Ty>, FuncId>,
 }
 
 // FIXME: cleanup of Jit (needs to call free_memory())
@@ -118,6 +120,7 @@ impl Default for Jit {
             compiled_functions: FxHashMap::default(),
             shims: FxHashMap::default(),
             statics: FxHashMap::default(),
+            drop_in_place_funcs: FxHashMap::default(),
         }
     }
 }
@@ -169,6 +172,7 @@ impl Jit {
             module: &mut self.module,
             shims: &mut self.shims,
             statics: &mut self.statics,
+            drop_in_place_funcs: &mut self.drop_in_place_funcs,
             env,
             engine: jit_engine,
             referenced_locals: find_referenced_locals(&body),
@@ -216,23 +220,17 @@ impl Jit {
 struct FunctionTranslator<'a> {
     db: &'a dyn CodegenDatabase,
     body: &'a MirBody,
-    variables: ArenaMap<LocalId, LocalKind>,
+    variables: ArenaMap<LocalId, PlaceKind>,
     blocks: ArenaMap<BasicBlockId, Block>,
     builder: FunctionBuilder<'a>,
     module: &'a mut JITModule,
     shims: &'a mut FxHashMap<MonoFunctionId, FuncId>,
     statics: &'a mut FxHashMap<StaticId, DataId>,
+    drop_in_place_funcs: &'a mut FxHashMap<Option<Ty>, FuncId>,
     env: Arc<TraitEnvironment>,
     engine: &'a JitEngine<'a>,
     referenced_locals: FxHashSet<LocalId>,
     pointer_type: Type,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum LocalKind {
-    Variable(Variable),
-    VariablePair(Variable, Variable),
-    Stack(StackSlot),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -279,6 +277,8 @@ impl<'a> FunctionTranslator<'a> {
             .module
             .declare_anonymous_function(&ctx.func.signature)
             .expect("failed to declare anonymous function for shim");
+
+        self.shims.insert(mono_func_id, id);
 
         let mut builder_context = FunctionBuilderContext::new(); // FIXME share
         let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
@@ -364,25 +364,28 @@ impl<'a> FunctionTranslator<'a> {
         let mut param_values = self.builder.block_params(block).to_vec();
         param_values.reverse();
         for param in self.body.param_locals.iter().copied() {
-            match self.get_variable(param) {
-                LocalKind::Variable(var) => self.builder.def_var(var, param_values.pop().unwrap()),
-                LocalKind::VariablePair(var1, var2) => {
-                    self.builder.def_var(var1, param_values.pop().unwrap());
-                    self.builder.def_var(var2, param_values.pop().unwrap());
+            let ty = self.body.locals[param].ty.clone();
+            let layout = self.ty_layout(ty.clone());
+            let value = match layout.abi {
+                Abi::Uninhabited => continue,
+                Abi::Scalar(_) => {
+                    let val = param_values.pop().unwrap();
+                    ValueKind::Primitive(val)
                 }
-                LocalKind::Stack(ss) => {
-                    let ty = self.body.locals[param].ty.clone();
-                    let layout = self.ty_layout(ty);
-                    let size = layout.size.bytes_usize() as i32;
-                    if size > 0 {
-                        self.translate_mem_copy(
-                            Pointer::stack_slot(ss),
-                            Pointer::new(param_values.pop().unwrap()),
-                            size,
-                        );
-                    }
+                Abi::ScalarPair(_, _) => {
+                    let val1 = param_values.pop().unwrap();
+                    let val2 = param_values.pop().unwrap();
+                    ValueKind::ScalarPair(val1, val2)
                 }
-            }
+                Abi::Aggregate { sized: true } if layout.size.bytes() == 0 => continue,
+                Abi::Aggregate { sized: true } => {
+                    let addr = param_values.pop().unwrap();
+                    ValueKind::Aggregate(Pointer::new(addr), None)
+                }
+                _ => panic!("unimplemented abi for param: {:?}", layout.abi),
+            };
+            let place = self.get_variable(param);
+            self.translate_place_kind_store(place, ty, value);
         }
     }
 
@@ -400,11 +403,12 @@ impl<'a> FunctionTranslator<'a> {
             TerminatorKind::Return => {
                 self.emit_return();
             }
-            TerminatorKind::Drop { place: _, target, unwind } => {
+            TerminatorKind::Drop { place, target, unwind } => {
                 // TODO actually drop place
                 if unwind.is_some() {
                     panic!("unsupported unwind");
                 }
+                self.translate_drop(place);
                 self.builder.ins().jump(self.blocks[*target], &[]);
             }
             TerminatorKind::SwitchInt { discr, targets } => {
@@ -536,6 +540,7 @@ impl<'a> FunctionTranslator<'a> {
                         self.store_func_call_return(&results, destination);
                     }
                     Some((_abi, CallableDefId::FunctionId(func_id), subst)) => {
+                        // FIXME handle drop_in_place calls by calling shim
                         let (func, subst) =
                             self.db.lookup_impl_method(self.env.clone(), func_id, subst.clone());
                         let mono_func_id =
@@ -930,12 +935,7 @@ impl<'a> FunctionTranslator<'a> {
         projection: &[ProjectionElem<LocalId, Ty>],
     ) -> (PlaceKind, Ty) {
         let mut ty = self.body.locals[local].ty.clone();
-        let var = self.get_variable(local);
-        let mut kind = match var {
-            LocalKind::Variable(var) => PlaceKind::Variable(var),
-            LocalKind::VariablePair(var1, var2) => PlaceKind::VariablePair(var1, var2),
-            LocalKind::Stack(ss) => PlaceKind::Addr(Pointer::stack_slot(ss), None),
-        };
+        let mut kind = self.get_variable(local);
         for elem in projection {
             match elem {
                 ProjectionElem::Deref => {
@@ -1153,11 +1153,14 @@ impl<'a> FunctionTranslator<'a> {
                         pointer.store(self, value, MemFlags::trusted());
                     }
                     ValueKind::ScalarPair(val1, val2) => {
-                        let layout = self.ty_layout(ty);
-                        let off1 = layout.fields.offset(0).bytes_usize() as i64;
-                        let off2 = layout.fields.offset(1).bytes_usize() as i64;
-                        pointer.offset_i64(self, off1).store(self, val1, MemFlags::trusted());
-                        pointer.offset_i64(self, off2).store(self, val2, MemFlags::trusted());
+                        let layout = self.ty_layout(ty.clone());
+                        let Abi::ScalarPair(s1, s2) = layout.abi else {
+                            panic!("wrong layout of scalar pair: {:?}", layout.abi)
+                        };
+                        let tdl = self.db.target_data_layout(self.env.krate).unwrap();
+                        let off2 = scalar_pair_calculate_b_offset(&tdl, s1, s2);
+                        pointer.store(self, val1, MemFlags::trusted());
+                        pointer.offset(self, off2).store(self, val2, MemFlags::trusted());
                     }
                     ValueKind::Aggregate(pointer_from, None) => {
                         let layout = self.ty_layout(ty);
@@ -1172,7 +1175,7 @@ impl<'a> FunctionTranslator<'a> {
         }
     }
 
-    fn get_variable(&mut self, local: LocalId) -> LocalKind {
+    fn get_variable(&mut self, local: LocalId) -> PlaceKind {
         let typ = self.body.locals[local].ty.clone();
         let variable = *self.variables.entry(local).or_insert_with(|| {
             // FIXME error handling here!
@@ -1180,8 +1183,10 @@ impl<'a> FunctionTranslator<'a> {
                 .db
                 .layout_of_ty(typ.clone(), self.env.clone())
                 .expect("failed to lay out type");
-            let needs_stack = self.referenced_locals.contains(&local)
-                || matches!(layout.abi, Abi::Aggregate { .. });
+            let needs_stack = !matches!(layout.abi, Abi::Uninhabited)
+                && (self.referenced_locals.contains(&local)
+                    || drop::needs_drop(self.db, &typ)
+                    || matches!(layout.abi, Abi::Aggregate { .. }));
             if needs_stack {
                 if !layout.is_sized() {
                     panic!("unsized type in local");
@@ -1192,12 +1197,12 @@ impl<'a> FunctionTranslator<'a> {
                     size: size as u32,
                     align_shift: layout.align.pref.bytes().ilog2() as u8,
                 });
-                LocalKind::Stack(slot)
+                PlaceKind::Addr(Pointer::stack_slot(slot), None)
             } else if let Abi::Scalar(scalar) = layout.abi {
                 let var = Variable::new(local.into_raw().into_u32() as usize * 2);
                 let typ = translate_scalar_type(scalar, self.module.isa());
                 self.builder.declare_var(var, typ);
-                LocalKind::Variable(var)
+                PlaceKind::Variable(var)
             } else if let Abi::ScalarPair(scalar1, scalar2) = layout.abi {
                 let typ1 = translate_scalar_type(scalar1, self.module.isa());
                 let typ2 = translate_scalar_type(scalar2, self.module.isa());
@@ -1205,7 +1210,9 @@ impl<'a> FunctionTranslator<'a> {
                 let var2 = Variable::new(local.into_raw().into_u32() as usize * 2 + 1);
                 self.builder.declare_var(var1, typ1);
                 self.builder.declare_var(var2, typ2);
-                LocalKind::VariablePair(var1, var2)
+                PlaceKind::VariablePair(var1, var2)
+            } else if let Abi::Uninhabited = layout.abi {
+                PlaceKind::Addr(Pointer::dangling(layout.unadjusted_abi_align), None)
             } else {
                 panic!("unsupported layout for local: {:?}", layout.abi);
             }
@@ -1373,6 +1380,15 @@ impl<'a> FunctionTranslator<'a> {
                 let typ = translate_scalar_type(scalar, self.module.isa());
                 let loaded_val = pointer.load(self, typ, MemFlags::trusted());
                 ValueKind::Primitive(loaded_val)
+            }
+            Abi::ScalarPair(s1, s2) => {
+                let typ1 = translate_scalar_type(s1, self.module.isa());
+                let typ2 = translate_scalar_type(s2, self.module.isa());
+                let tdl = self.db.target_data_layout(self.env.krate).unwrap();
+                let off = scalar_pair_calculate_b_offset(&tdl, s1, s2);
+                let v1 = pointer.load(self, typ1, MemFlags::trusted());
+                let v2 = pointer.offset(self, off).load(self, typ2, MemFlags::trusted());
+                ValueKind::ScalarPair(v1, v2)
             }
             Abi::Aggregate { sized: true } => ValueKind::Aggregate(pointer, None),
             _ => panic!("unsupported abi for var copy: {:?}", abi),
