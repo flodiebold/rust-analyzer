@@ -1,82 +1,104 @@
-use cranelift::prelude::{AbiParam, FunctionBuilder, FunctionBuilderContext, InstBuilder};
+use cranelift::{
+    codegen::Context,
+    prelude::{AbiParam, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type},
+};
+use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
 use hir_def::{
-    AssocItemId, FunctionId, lang_item::{LangItem, lang_item},
+    AssocItemId, FunctionId,
+    lang_item::{LangItem, lang_item},
 };
 use hir_expand::name::Name;
 use hir_ty::{
     TraitEnvironment,
     db::HirDatabase,
     mir::Place,
-    next_solver::{GenericArgs, Ty, TyKind},
+    next_solver::{DbInterner, GenericArgs, Ty, TyKind},
 };
+use rustc_hash::FxHashMap;
+use triomphe::Arc;
 
-use crate::{FunctionTranslator, MonoFunction};
+use crate::{CompilationProcess, FunctionTranslator, MonoFunction};
 
 impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
     pub(crate) fn translate_drop(&mut self, place: Place<'db>) {
         let (kind, ty) = self.translate_place_with_ty(place);
 
-        let drop_in_place = self.get_drop_in_place_func(ty);
-
-        if let Some(func) = drop_in_place {
+        if needs_drop(self.db(), &ty) {
+            let drop_in_place = self.compilation.declare_drop_shim(ty);
             let addr = self.translate_place_kind_addr(kind);
-            let func_ref = self.module.declare_func_in_func(func, &mut self.builder.func);
+            let func_ref =
+                self.compilation.module.declare_func_in_func(drop_in_place, &mut self.builder.func);
             self.builder.ins().call(func_ref, &[addr]);
         }
     }
+}
 
-    fn get_drop_in_place_func(&mut self, ty: Ty<'db>) -> Option<FuncId> {
-        if !needs_drop(self.db, &ty) {
-            return None;
-        }
-        if let Some(func) = self.drop_in_place_funcs.get(&Some(ty.clone())) {
-            return Some(*func);
-        }
-        let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
-        ctx.func.signature.params.push(AbiParam::new(self.pointer_type));
+impl<'a, 'db> CompilationProcess<'a, 'db> {
+    pub(super) fn compile_drop_shim(
+        &mut self,
+        id: FuncId,
+        ty: Ty<'db>,
+        ctx: &mut Context,
+        builder_context: &mut FunctionBuilderContext,
+    ) {
+        ctx.func.signature.params.push(AbiParam::new(self.module.isa().pointer_type()));
+        let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
+        let env = TraitEnvironment::empty(self.krate);
+        let pointer_type = self.module.isa().pointer_type();
+        super::reborrow_compilation!(self, compilation);
+        let mut drop_shim_builder = DropShimBuilder { compilation, env, builder, pointer_type };
+
+        drop_shim_builder.fill_drop_in_place(ty);
+
+        drop_shim_builder.builder.seal_all_blocks(); // FIXME do this better?
+        drop_shim_builder.builder.finalize();
 
         // FIXME can this legitimately fail?
-        let id = self
-            .module
-            .declare_anonymous_function(&ctx.func.signature)
-            .expect("failed to declare anonymous function for shim");
+        self.module.define_function(id, ctx).expect("failed to compile drop_in_place function");
+        self.module.clear_context(ctx);
+    }
+}
 
-        self.drop_in_place_funcs.insert(Some(ty.clone()), id);
+struct DropShimBuilder<'a, 'db> {
+    compilation: CompilationProcess<'a, 'db>,
+    env: Arc<TraitEnvironment<'db>>,
+    builder: FunctionBuilder<'a>,
+    pointer_type: Type,
+}
 
-        let mut builder_context = FunctionBuilderContext::new(); // FIXME share
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
-
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        let param = builder.block_params(block)[0];
+impl<'a, 'db> DropShimBuilder<'a, 'db> {
+    fn db(&self) -> &'db dyn HirDatabase {
+        self.compilation.db()
+    }
+    fn fill_drop_in_place(&mut self, ty: Ty<'db>) {
+        let block = self.builder.create_block();
+        self.builder.append_block_params_for_function_params(block);
+        self.builder.switch_to_block(block);
+        let param = self.builder.block_params(block)[0];
 
         // call drop if needed
-        let drop_fn = get_drop_fn(self.db, &self.env);
+        let drop_fn = get_drop_fn(self.db(), &self.env);
         if let Some(drop_fn) = drop_fn {
-            let fn_subst = GenericArgs::new_from_iter(self.interner, [ty.into()]);
+            let fn_subst = GenericArgs::new_from_iter(self.compilation.interner, [ty.into()]);
             let (drop_fn_impl, subst) =
-                self.db.lookup_impl_method(self.env.clone(), drop_fn, fn_subst.clone());
+                self.db().lookup_impl_method(self.env.clone(), drop_fn, fn_subst.clone());
             if drop_fn_impl != drop_fn {
                 // drop is actually implemented
-                let func = self.get_shim(MonoFunction::new(self.db, drop_fn_impl, subst));
-                let func_ref = self.module.declare_func_in_func(func, &mut builder.func);
-                builder.ins().call(func_ref, &[param]);
+                let func = self.compilation.declare_call_shim(MonoFunction::new(
+                    self.db(),
+                    drop_fn_impl,
+                    subst,
+                ));
+                let func_ref =
+                    self.compilation.module.declare_func_in_func(func, &mut self.builder.func);
+                self.builder.ins().call(func_ref, &[param]);
             }
         }
 
         // TODO: drop fields etc
 
-        builder.ins().return_(&[]);
-
-        builder.seal_all_blocks();
-        builder.finalize();
-        // FIXME can this legitimately fail?
-        self.module
-            .define_function(id, &mut ctx)
-            .expect("failed to compile drop_in_place function");
-        Some(id)
+        self.builder.ins().return_(&[]);
     }
 }
 

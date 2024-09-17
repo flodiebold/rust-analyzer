@@ -1,4 +1,3 @@
-
 #![allow(unused)]
 
 mod drop;
@@ -9,13 +8,19 @@ mod test_db;
 mod tests;
 
 use std::{
-    cmp::Ordering, io::Write, marker::PhantomData, panic::{AssertUnwindSafe, catch_unwind}, process::abort, sync::Mutex
+    cmp::Ordering,
+    io::Write,
+    marker::PhantomData,
+    panic::{AssertUnwindSafe, catch_unwind},
+    process::abort,
+    sync::Mutex,
 };
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context as _, anyhow};
+use base_db::Crate;
 use cranelift::{
     codegen::{
-        self,
+        self, Context,
         ir::{GlobalValue, StackSlot, immediates::Offset32},
     },
     frontend::Switch,
@@ -114,6 +119,244 @@ pub struct Jit<'db> {
     drop_in_place_funcs: FxHashMap<Option<Ty<'db>>, FuncId>,
 }
 
+struct CompilationProcess<'a, 'db> {
+    krate: Crate,
+    interner: DbInterner<'db>,
+    queue: &'a mut Vec<FuncToCompile<'db>>,
+    module: &'a mut JITModule,
+    shims: &'a mut FxHashMap<MonoFunction<'db>, FuncId>,
+    statics: &'a mut FxHashMap<StaticId, DataId>,
+    drop_in_place_funcs: &'a mut FxHashMap<Option<Ty<'db>>, FuncId>,
+}
+
+#[derive(Debug)]
+struct FuncToCompile<'db> {
+    func_id: FuncId,
+    kind: FuncKind<'db>,
+}
+
+#[derive(Debug)]
+enum FuncKind<'db> {
+    CallShim(MonoFunction<'db>),
+    Function(MonoFunction<'db>),
+    DropShim(Ty<'db>),
+}
+
+macro_rules! reborrow_compilation {
+    ($self:ident, $id:ident) => {
+        let $id = CompilationProcess {
+            krate: $self.krate,
+            interner: $self.interner,
+            queue: &mut *$self.queue,
+            module: &mut *$self.module,
+            shims: &mut *$self.shims,
+            statics: &mut *$self.statics,
+            drop_in_place_funcs: &mut *$self.drop_in_place_funcs,
+        };
+    };
+}
+use reborrow_compilation;
+
+impl<'a, 'db> CompilationProcess<'a, 'db> {
+    fn db(&self) -> &'db dyn HirDatabase {
+        self.interner.db()
+    }
+
+    fn declare_call_shim(&mut self, mono_func_id: MonoFunction<'db>) -> FuncId {
+        if let Some(shim) = self.shims.get(&mono_func_id) {
+            return *shim;
+        }
+
+        let func = mono_func_id.func(self.db());
+        let subst = mono_func_id.subst(self.db());
+        let sig = self.db().callable_item_signature(func.into()).instantiate(self.interner, &subst);
+
+        match sig.abi() {
+            FnAbi::Rust => {}
+            _ => panic!("unsupported abi for shim: {:?}", sig.abi()),
+        };
+
+        let signature = translate_signature(sig, self.module.isa(), self.db(), self.krate);
+
+        // FIXME can this legitimately fail?
+        let id = self
+            .module
+            .declare_anonymous_function(&signature)
+            .expect("failed to declare anonymous function for shim");
+
+        self.shims.insert(mono_func_id, id);
+        self.queue.push(FuncToCompile { func_id: id, kind: FuncKind::CallShim(mono_func_id) });
+        id
+    }
+
+    fn declare_function(&mut self, mono_func_id: MonoFunction<'db>) -> FuncId {
+        let db = self.db();
+        let func_id = mono_func_id.func(db);
+        let subst = mono_func_id.subst(db);
+        let data = db.function_signature(func_id);
+        eprintln!("Declaring function {:?} ({})", func_id, data.name.as_str());
+        let interner = DbInterner::new_with(db, Some(func_id.krate(db)), None);
+        let sig = db.callable_item_signature(func_id.into()).instantiate(interner, subst);
+        let krate = func_id.krate(db);
+
+        match sig.abi() {
+            FnAbi::Rust => {}
+            _ => panic!("unsupported abi for function: {:?}", sig.abi()),
+        };
+
+        let env = db.trait_environment(func_id.into());
+
+        let signature = translate_signature(sig, self.module.isa(), db, krate);
+
+        // FIXME can this legitimately fail?
+        let id = self
+            .module
+            // FIXME declare with name and linkage?
+            .declare_anonymous_function(&signature)
+            .expect("failed to declare function");
+
+        self.queue.push(FuncToCompile { func_id: id, kind: FuncKind::Function(mono_func_id) });
+
+        id
+    }
+
+    fn declare_drop_shim(&mut self, ty: Ty<'db>) -> FuncId {
+        if let Some(func) = self.drop_in_place_funcs.get(&Some(ty.clone())) {
+            return *func;
+        }
+        let mut signature = Signature::new(CallConv::Fast);
+        signature.params.push(AbiParam::new(self.module.isa().pointer_type()));
+        // FIXME can this legitimately fail?
+        let id = self
+            .module
+            .declare_anonymous_function(&signature)
+            .expect("failed to declare anonymous function for shim");
+        self.drop_in_place_funcs.insert(Some(ty), id);
+        self.queue.push(FuncToCompile { func_id: id, kind: FuncKind::DropShim(ty) });
+        id
+    }
+
+    fn compile_function(
+        &mut self,
+        id: FuncId,
+        mono_func_id: MonoFunction<'db>,
+        ctx: &mut cranelift::codegen::Context,
+        builder_context: &mut FunctionBuilderContext,
+    ) -> anyhow::Result<()> {
+        let db = self.db();
+        let func_id = mono_func_id.func(db);
+        let subst = mono_func_id.subst(db);
+        let data = db.function_signature(func_id);
+        eprintln!("Compiling function {:?} ({})", func_id, data.name.as_str());
+        let interner = DbInterner::new_with(db, Some(func_id.krate(db)), None);
+        let sig = db.callable_item_signature(func_id.into()).instantiate(interner, subst);
+        let krate = func_id.krate(db);
+
+        match sig.abi() {
+            FnAbi::Rust => {}
+            _ => panic!("unsupported abi for function: {:?}", sig.abi()),
+        };
+
+        let env = db.trait_environment(func_id.into());
+
+        ctx.func.signature = translate_signature(sig, self.module.isa(), db, krate);
+
+        let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
+
+        let body = db
+            .monomorphized_mir_body(func_id.into(), subst, env.clone())
+            .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
+
+        let pointer_type = self.module.isa().pointer_type();
+        reborrow_compilation!(self, compilation);
+        let mut translator = FunctionTranslator {
+            pointer_type,
+            compilation,
+            body: &body,
+            variables: ArenaMap::new(),
+            blocks: ArenaMap::new(),
+            builder,
+            env,
+            referenced_locals: find_referenced_locals(&body),
+        };
+
+        translator.create_blocks();
+
+        translator.compile_all_blocks();
+
+        translator.builder.seal_all_blocks(); // FIXME do this better?
+        translator.builder.finalize();
+
+        // Define the function to jit. This finishes compilation, although
+        // there may be outstanding relocations to perform. Currently, jit
+        // cannot finish relocations until all functions to be called are
+        // defined. For this toy demo for now, we'll just finalize the
+        // function below.
+        self.module.define_function(id, ctx).context("failed to define function")?;
+
+        // Now that compilation is finished, we can clear out the context state.
+        self.module.clear_context(ctx);
+
+        Ok(())
+    }
+
+    fn compile_shim(
+        &mut self,
+        id: FuncId,
+        mono_func_id: MonoFunction<'db>,
+        engine: &JitEngine<'db>,
+        ctx: &mut Context,
+        builder_context: &mut FunctionBuilderContext,
+    ) {
+        let db = self.db();
+        let func = mono_func_id.func(db);
+        let subst = mono_func_id.subst(db);
+        let sig = db.callable_item_signature(func.into()).instantiate(self.interner, &subst);
+
+        match sig.abi() {
+            FnAbi::Rust => {}
+            _ => panic!("unsupported abi for shim: {:?}", sig.abi()),
+        };
+
+        ctx.func.signature = translate_signature(sig, self.module.isa(), db, self.krate);
+
+        let sig = ctx.func.signature.clone();
+
+        let mut builder = FunctionBuilder::new(&mut ctx.func, builder_context);
+
+        let mut signature = Signature::new(self.module.isa().default_call_conv());
+        let ptr = self.module.isa().pointer_type();
+        signature.params.push(AbiParam::new(ptr));
+        signature.params.push(AbiParam::new(types::I64));
+        signature.returns.push(AbiParam::new(ptr));
+        let sig_ref = builder.import_signature(signature);
+
+        let block = builder.create_block();
+        builder.switch_to_block(block);
+        builder.append_block_params_for_function_params(block);
+        // FIXME can we pass engine and address of ensure_function as "global value" / "VM context pointer"?
+        // FIXME also maybe just import the function? if that works? (need to declare it as exported though)
+        let arg1 = builder.ins().iconst(ptr, engine as *const JitEngine as i64);
+        let arg2 = builder.ins().iconst(types::I64, mono_func_id.0.as_bits() as i64);
+        let callee = builder.ins().iconst(ptr, ensure_function as usize as i64);
+        let call = builder.ins().call_indirect(sig_ref, callee, &[arg1, arg2]);
+        let result = builder.inst_results(call)[0];
+
+        let sig_ref = builder.import_signature(sig);
+        let args = builder.block_params(block).to_vec();
+        let call = builder.ins().call_indirect(sig_ref, result, &args);
+        let rvals = builder.inst_results(call).to_vec();
+        builder.ins().return_(&rvals);
+        // tail call doesn't work in SystemV callconv, but we might want another one anyway?
+        // builder.ins().return_call_indirect(sig_ref, result, &[]);
+        builder.seal_all_blocks(); // FIXME do this better?
+        builder.finalize();
+        // FIXME can this legitimately fail?
+        self.module.define_function(id, ctx).expect("failed to compile shim function");
+        self.module.clear_context(ctx);
+    }
+}
+
 // FIXME: cleanup of Jit (needs to call free_memory())
 
 impl<'db> Default for Jit<'db> {
@@ -155,71 +398,50 @@ impl<'db> Jit<'db> {
             return Ok(self.module.get_finalized_function(*f));
         }
 
+        let mut queue = Vec::new();
+
         let func_id = mono_func_id.func(db);
-        let subst = mono_func_id.subst(db);
-        let data = db.function_signature(func_id);
-        eprintln!("Compiling function {:?} ({})", func_id, data.name.as_str());
-        let interner = DbInterner::new_with(db, Some(func_id.krate(db)), None);
-        let sig = db.callable_item_signature(func_id.into()).instantiate(interner, subst);
+        let krate = func_id.krate(db);
+        let interner = DbInterner::new_with(db, Some(krate), None);
 
-        match sig.abi() {
-            FnAbi::Rust => {}
-            _ => panic!("unsupported abi for function: {:?}", sig.abi()),
-        };
-
-        let env = db.trait_environment(func_id.into());
-
-        self.ctx.func.signature = translate_signature(sig, self.module.isa(), db, &env);
-
-        let builder = FunctionBuilder::new(&mut self.ctx.func, &mut self.builder_context);
-
-        let body = db
-            .monomorphized_mir_body(func_id.into(), subst, env.clone())
-            .map_err(|e| anyhow!("failed to lower MIR: {:?}", e))?;
-
-        let mut translator = FunctionTranslator {
-            pointer_type: self.module.isa().pointer_type(),
-            db,
+        let mut compilation = CompilationProcess {
+            krate,
             interner,
-            body: &body,
-            variables: ArenaMap::new(),
-            blocks: ArenaMap::new(),
-            builder,
             module: &mut self.module,
             shims: &mut self.shims,
             statics: &mut self.statics,
             drop_in_place_funcs: &mut self.drop_in_place_funcs,
-            env,
-            engine: jit_engine,
-            referenced_locals: find_referenced_locals(&body),
+            queue: &mut queue,
         };
 
-        translator.create_blocks();
-
-        translator.compile_all_blocks();
-
-        translator.builder.seal_all_blocks(); // FIXME do this better?
-        translator.builder.finalize();
-
-        // eprintln!("{}", self.ctx.func);
-
-        let id = self
-            .module
-            // FIXME declare with name and linkage?
-            .declare_anonymous_function(&self.ctx.func.signature)
-            .context("failed to declare function")?;
+        let id = compilation.declare_function(mono_func_id);
 
         self.compiled_functions.insert(mono_func_id, id);
 
-        // Define the function to jit. This finishes compilation, although
-        // there may be outstanding relocations to perform. Currently, jit
-        // cannot finish relocations until all functions to be called are
-        // defined. For this toy demo for now, we'll just finalize the
-        // function below.
-        self.module.define_function(id, &mut self.ctx).context("failed to define function")?;
-
-        // Now that compilation is finished, we can clear out the context state.
-        self.module.clear_context(&mut self.ctx);
+        while let Some(task) = compilation.queue.pop() {
+            eprintln!("task: {:?}", task);
+            match task.kind {
+                FuncKind::CallShim(mono_function) => compilation.compile_shim(
+                    task.func_id,
+                    mono_function,
+                    jit_engine,
+                    &mut self.ctx,
+                    &mut self.builder_context,
+                ),
+                FuncKind::Function(mono_function) => compilation.compile_function(
+                    task.func_id,
+                    mono_function,
+                    &mut self.ctx,
+                    &mut self.builder_context,
+                )?,
+                FuncKind::DropShim(ty) => compilation.compile_drop_shim(
+                    task.func_id,
+                    ty,
+                    &mut self.ctx,
+                    &mut self.builder_context,
+                ),
+            }
+        }
 
         // Finalize the functions which we just defined, which resolves any
         // outstanding relocations (patching in addresses, now that they're
@@ -236,18 +458,12 @@ impl<'db> Jit<'db> {
 }
 
 struct FunctionTranslator<'a, 'db> {
-    db: &'db dyn HirDatabase,
-    interner: DbInterner<'db>,
+    compilation: CompilationProcess<'a, 'db>,
     body: &'a MirBody<'db>,
     variables: ArenaMap<LocalId<'db>, PlaceKind>,
     blocks: ArenaMap<BasicBlockId<'db>, Block>,
     builder: FunctionBuilder<'a>,
-    module: &'a mut JITModule,
-    shims: &'a mut FxHashMap<MonoFunction<'db>, FuncId>,
-    statics: &'a mut FxHashMap<StaticId, DataId>,
-    drop_in_place_funcs: &'a mut FxHashMap<Option<Ty<'db>>, FuncId>,
     env: Arc<TraitEnvironment<'db>>,
-    engine: &'a JitEngine<'db>,
     referenced_locals: FxHashSet<LocalId<'db>>,
     pointer_type: Type,
 }
@@ -273,79 +489,35 @@ enum MemSlot {
 }
 
 impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
+    fn db(&self) -> &'db dyn HirDatabase {
+        self.compilation.db()
+    }
+
     fn get_shim(&mut self, mono_func_id: MonoFunction<'db>) -> FuncId {
-        if let Some(shim) = self.shims.get(&mono_func_id) {
-            return *shim;
-        }
+        self.compilation.declare_call_shim(mono_func_id)
+    }
 
-        let func = mono_func_id.func(self.db);
-        let subst = mono_func_id.subst(self.db);
-        let sig = self.db.callable_item_signature(func.into()).instantiate(self.interner, &subst);
+    fn isa(&self) -> &dyn TargetIsa {
+        self.compilation.module.isa()
+    }
 
-        match sig.abi() {
-            FnAbi::Rust => {}
-            _ => panic!("unsupported abi for shim: {:?}", sig.abi()),
-        };
-
-        let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
-        ctx.func.signature = translate_signature(sig, self.module.isa(), self.db, &self.env);
-
-        let sig = ctx.func.signature.clone();
-
-        // FIXME can this legitimately fail?
-        let id = self
-            .module
-            .declare_anonymous_function(&ctx.func.signature)
-            .expect("failed to declare anonymous function for shim");
-
-        self.shims.insert(mono_func_id, id);
-
-        let mut builder_context = FunctionBuilderContext::new(); // FIXME share
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
-
-        let mut signature = Signature::new(self.module.isa().default_call_conv());
-        let ptr = self.module.isa().pointer_type();
-        signature.params.push(AbiParam::new(ptr));
-        signature.params.push(AbiParam::new(types::I64));
-        signature.returns.push(AbiParam::new(ptr));
-        let sig_ref = builder.import_signature(signature);
-
-        let block = builder.create_block();
-        builder.switch_to_block(block);
-        builder.append_block_params_for_function_params(block);
-        // FIXME can we pass engine and address of ensure_function as "global value" / "VM context pointer"?
-        // FIXME also maybe just import the function? if that works? (need to declare it as exported though)
-        let arg1 = builder.ins().iconst(ptr, self.engine as *const JitEngine as i64);
-        let arg2 = builder.ins().iconst(types::I64, mono_func_id.0.as_bits() as i64);
-        let callee = builder.ins().iconst(ptr, ensure_function as usize as i64);
-        let call = builder.ins().call_indirect(sig_ref, callee, &[arg1, arg2]);
-        let result = builder.inst_results(call)[0];
-
-        let sig_ref = builder.import_signature(sig);
-        let args = builder.block_params(block).to_vec();
-        let call = builder.ins().call_indirect(sig_ref, result, &args);
-        let rvals = builder.inst_results(call).to_vec();
-        builder.ins().return_(&rvals);
-        // tail call doesn't work in SystemV callconv, but we might want another one anyway?
-        // builder.ins().return_call_indirect(sig_ref, result, &[]);
-        builder.seal_all_blocks();
-        builder.finalize();
-        // FIXME can this legitimately fail?
-        self.module.define_function(id, &mut ctx).expect("failed to compile shim function");
-        id
+    fn module(&mut self) -> &mut JITModule {
+        self.compilation.module
     }
 
     fn get_static(&mut self, static_id: StaticId) -> (GlobalValue, Ty<'db>) {
-        let static_data = self.db.static_signature(static_id);
-        let data = self.db.const_eval_static(static_id).expect("failed to eval static");
+        // TODO move to compilation
+        let static_data = self.db().static_signature(static_id);
+        let data = self.db().const_eval_static(static_id).expect("failed to eval static");
         let ty = self
-            .db
+            .db()
             .value_ty(static_id.into())
             .unwrap()
-            .instantiate(self.interner, GenericArgs::default());
-        let data_id = self.statics.entry(static_id).or_insert_with(|| {
+            .instantiate(self.compilation.interner, GenericArgs::default());
+        let data_id = self.compilation.statics.entry(static_id).or_insert_with(|| {
             let mut desc = DataDescription::new();
             let data_id = self
+                .compilation
                 .module
                 .declare_anonymous_data(static_data.flags.contains(StaticFlags::MUTABLE), false)
                 .expect("failed to declare static data");
@@ -360,10 +532,14 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 }
             };
             desc.define(bytes.memory.clone());
-            self.module.define_data(data_id, &desc).expect("failed to define static data");
+            self.compilation
+                .module
+                .define_data(data_id, &desc)
+                .expect("failed to define static data");
             data_id
         });
-        let global_value = self.module.declare_data_in_func(*data_id, &mut self.builder.func);
+        let global_value =
+            self.compilation.module.declare_data_in_func(*data_id, &mut self.builder.func);
         (global_value, ty)
     }
 
@@ -425,7 +601,6 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 self.emit_return();
             }
             TerminatorKind::Drop { place, target, unwind } => {
-                // TODO actually drop place
                 if unwind.is_some() {
                     panic!("unsupported unwind");
                 }
@@ -452,7 +627,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         TyKind::FnDef(func_id, subst) => {
                             let subst = subst.clone();
                             let abi =
-                                self.db.callable_item_signature(func_id.0).skip_binder().abi();
+                                self.db().callable_item_signature(func_id.0).skip_binder().abi();
                             Some((abi, func_id.0, subst))
                         }
                         _ => None,
@@ -471,19 +646,22 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                     assert_eq!(abi, FnAbi::Rust);
                     match id {
                         CallableDefId::StructId(s) => {
-                            let ty = Ty::new_adt(self.interner, s.into(), subst);
+                            let ty = Ty::new_adt(self.compilation.interner, s.into(), subst);
                             let layout = self.ty_layout(ty);
                             let tys: Vec<_> = self
-                                .db
+                                .db()
                                 .field_types(VariantId::StructId(s))
                                 .iter()
-                                .map(|(_, t)| t.instantiate(self.interner, &subst))
+                                .map(|(_, t)| t.instantiate(self.compilation.interner, &subst))
                                 .collect();
                             self.store_tuple_layout(&layout, &tys, *destination, &args);
                         }
                         CallableDefId::EnumVariantId(ev) => {
-                            let ty =
-                                Ty::new_adt(self.interner, ev.lookup(self.db).parent.into(), subst);
+                            let ty = Ty::new_adt(
+                                self.compilation.interner,
+                                ev.lookup(self.db()).parent.into(),
+                                subst,
+                            );
                             let layout = self.ty_layout(ty);
                             let variant_id = VariantId::EnumVariantId(ev);
                             let layout = self.store_tag_and_get_variant_layout(
@@ -492,10 +670,10 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                                 *destination,
                             );
                             let tys: Vec<_> = self
-                                .db
+                                .db()
                                 .field_types(variant_id)
                                 .iter()
-                                .map(|(_, t)| t.instantiate(self.interner, &subst))
+                                .map(|(_, t)| t.instantiate(self.compilation.interner, &subst))
                                 .collect();
                             self.store_tuple_layout(layout, &tys, *destination, &args);
                         }
@@ -536,21 +714,24 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         self.translate_rust_intrinsic_call(func_id, subst, &args, *destination);
                     }
                     Some((_abi, CallableDefId::FunctionId(func_id), subst))
-                        if is_extern_func(self.db, func_id) =>
+                        if is_extern_func(self.db(), func_id) =>
                     {
                         let sig = self
-                            .db
+                            .db()
                             .callable_item_signature(func_id.into())
-                            .instantiate(self.interner, &subst);
-                        let data = self.db.function_signature(func_id);
+                            .instantiate(self.compilation.interner, &subst);
+                        let data = self.db().function_signature(func_id);
                         // TODO calling convention.....
-                        let sig = translate_signature(sig, self.module.isa(), self.db, &self.env);
+                        let sig = translate_signature(sig, self.isa(), self.db(), self.env.krate);
                         let func = self
+                            .compilation
                             .module
                             .declare_function(&data.name.as_str(), Linkage::Import, &sig)
                             .expect("failed to declare function");
-                        let func_ref =
-                            self.module.declare_func_in_func(func, &mut self.builder.func);
+                        let func_ref = self
+                            .compilation
+                            .module
+                            .declare_func_in_func(func, &mut self.builder.func);
                         let call = self.builder.ins().call(func_ref, &args);
                         let results = self.builder.inst_results(call).to_vec();
                         self.store_func_call_return(&results, *destination);
@@ -558,20 +739,23 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                     Some((_abi, CallableDefId::FunctionId(func_id), subst)) => {
                         // FIXME handle drop_in_place calls by calling shim
                         let (func, subst) =
-                            self.db.lookup_impl_method(self.env.clone(), func_id, subst.clone());
-                        let mono_func_id = MonoFunction::new(self.db, func, subst);
+                            self.db().lookup_impl_method(self.env.clone(), func_id, subst.clone());
+                        let mono_func_id = MonoFunction::new(self.db(), func, subst);
                         let shim = self.get_shim(mono_func_id);
-                        let func_ref =
-                            self.module.declare_func_in_func(shim, &mut self.builder.func);
+                        let func_ref = self
+                            .compilation
+                            .module
+                            .declare_func_in_func(shim, &mut self.builder.func);
                         let call = self.builder.ins().call(func_ref, &args);
                         let results = self.builder.inst_results(call).to_vec();
                         self.store_func_call_return(&results, *destination);
                     }
                     None => {
                         let (func, ty) = self.translate_operand_with_ty(func);
-                        let sig =
-                            ty.callable_sig(self.interner).expect("indirect call on non-callable");
-                        let sig = translate_signature(sig, self.module.isa(), self.db, &self.env);
+                        let sig = ty
+                            .callable_sig(self.compilation.interner)
+                            .expect("indirect call on non-callable");
+                        let sig = translate_signature(sig, self.isa(), self.db(), self.env.krate);
                         let sig_ref = self.builder.import_signature(sig);
                         let call = self.builder.ins().call_indirect(
                             sig_ref,
@@ -699,12 +883,11 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 let to_layout = self.ty_layout(to_ty.clone());
                 match kind {
                     CastKind::IntToInt => {
-                        let (from_sz, from_sign) =
-                            get_int_ty(&from_ty, self.module.isa()).expect("int");
-                        let (to_sz, to_sign) = get_int_ty(&to_ty, self.module.isa()).expect("int");
+                        let (from_sz, from_sign) = get_int_ty(&from_ty, self.isa()).expect("int");
+                        let (to_sz, to_sign) = get_int_ty(&to_ty, self.isa()).expect("int");
                         let to_typ = match &to_layout.backend_repr {
                             BackendRepr::Scalar(scalar) => {
-                                translate_scalar_type(*scalar, self.module.isa())
+                                translate_scalar_type(*scalar, self.isa())
                             }
                             _ => panic!("int with non-scalar abi"),
                         };
@@ -718,10 +901,10 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         ValueKind::Primitive(cast_value)
                     }
                     CastKind::IntToFloat => {
-                        let (_, from_sign) = get_int_ty(&from_ty, self.module.isa()).expect("int");
+                        let (_, from_sign) = get_int_ty(&from_ty, self.isa()).expect("int");
                         let to_typ = match &to_layout.backend_repr {
                             BackendRepr::Scalar(scalar) => {
-                                translate_scalar_type(*scalar, self.module.isa())
+                                translate_scalar_type(*scalar, self.isa())
                             }
                             _ => panic!("float with non-scalar abi"),
                         };
@@ -734,10 +917,10 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         ValueKind::Primitive(cast_value)
                     }
                     CastKind::FloatToInt => {
-                        let (_, to_sign) = get_int_ty(&to_ty, self.module.isa()).expect("int");
+                        let (_, to_sign) = get_int_ty(&to_ty, self.isa()).expect("int");
                         let to_typ = match &to_layout.backend_repr {
                             BackendRepr::Scalar(scalar) => {
-                                translate_scalar_type(*scalar, self.module.isa())
+                                translate_scalar_type(*scalar, self.isa())
                             }
                             _ => panic!("int with non-scalar abi"),
                         };
@@ -753,7 +936,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         let from_sz = self.ty_layout(from_ty.clone()).size.bytes_usize();
                         let to_typ = match &to_layout.backend_repr {
                             BackendRepr::Scalar(scalar) => {
-                                translate_scalar_type(*scalar, self.module.isa())
+                                translate_scalar_type(*scalar, self.isa())
                             }
                             _ => panic!("float with non-scalar abi"),
                         };
@@ -794,19 +977,21 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                             panic!("reify non-fn")
                         };
                         let func_ref = match fn_id.0 {
-                            CallableDefId::FunctionId(func) if is_extern_func(self.db, func) => {
+                            CallableDefId::FunctionId(func) if is_extern_func(self.db(), func) => {
                                 panic!("unimplemented reify of extern func")
                             }
                             CallableDefId::FunctionId(func) => {
-                                let (func, subst) = self.db.lookup_impl_method(
+                                let (func, subst) = self.db().lookup_impl_method(
                                     self.env.clone(),
                                     func,
                                     subst.clone(),
                                 );
-                                let mono_func_id = MonoFunction::new(self.db, func, subst);
+                                let mono_func_id = MonoFunction::new(self.db(), func, subst);
                                 let shim = self.get_shim(mono_func_id);
-                                let func_ref =
-                                    self.module.declare_func_in_func(shim, &mut self.builder.func);
+                                let func_ref = self
+                                    .compilation
+                                    .module
+                                    .declare_func_in_func(shim, &mut self.builder.func);
                                 func_ref
                             }
                             CallableDefId::StructId(_) => {
@@ -816,14 +1001,14 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                                 panic!("unsupported reify of enum variant constructor")
                             }
                         };
-                        let ptr_typ = self.module.isa().pointer_type();
+                        let ptr_typ = self.isa().pointer_type();
                         let addr = self.builder.ins().func_addr(ptr_typ, func_ref);
                         ValueKind::Primitive(addr)
                     }
                     CastKind::PointerExposeAddress | CastKind::PointerFromExposedAddress => {
                         let to_typ = match &to_layout.backend_repr {
                             BackendRepr::Scalar(scalar) => {
-                                translate_scalar_type(*scalar, self.module.isa())
+                                translate_scalar_type(*scalar, self.isa())
                             }
                             _ => panic!("int with non-scalar abi"),
                         };
@@ -862,17 +1047,17 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         self.store_tuple(*tuple_ty, place, operands);
                     }
                     Adt(variant_id, subst) => {
-                        let adt = variant_id.adt_id(self.db);
-                        let ty = Ty::new_adt(self.interner, adt, *subst);
+                        let adt = variant_id.adt_id(self.db());
+                        let ty = Ty::new_adt(self.compilation.interner, adt, *subst);
                         let layout = self.ty_layout(ty.clone());
                         let layout =
                             self.store_tag_and_get_variant_layout(*variant_id, &layout, place);
-                        let field_types = self.db.field_types(*variant_id);
+                        let field_types = self.db().field_types(*variant_id);
                         for (i, op) in operands.iter().enumerate() {
                             let val = self.translate_operand(op);
                             let field_offset = layout.fields.offset(i);
                             let field_ty = field_types[LocalFieldId::from_raw((i as u32).into())]
-                                .instantiate(self.interner, subst);
+                                .instantiate(self.compilation.interner, subst);
                             self.translate_place_store_with_offset(
                                 place,
                                 field_ty,
@@ -895,7 +1080,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 let loop_block = self.builder.create_block();
                 let loop_block2 = self.builder.create_block();
                 let done_block = self.builder.create_block();
-                let pointer_type = self.module.isa().pointer_type();
+                let pointer_type = self.isa().pointer_type();
                 let index = self.builder.append_block_param(loop_block, pointer_type);
                 let zero = self.builder.ins().iconst(pointer_type, 0);
                 self.builder.ins().jump(loop_block, &[zero]);
@@ -944,7 +1129,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
             _ => panic!("can't index ty: {:?}", ty),
         };
         let layout = self.ty_layout(ty.clone());
-        let ptr_typ = self.module.isa().pointer_type();
+        let ptr_typ = self.isa().pointer_type();
         let elem_size = self.builder.ins().iconst(ptr_typ, layout.size.bytes_usize() as i64);
         let idx_offset = self.builder.ins().imul(idx, elem_size);
         let addr = self.builder.ins().iadd(addr, idx_offset);
@@ -963,7 +1148,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 ProjectionElem::Deref => {
                     let derefed_ty =
                         ty.as_reference_or_ptr().expect("non-ptr deref target").0.clone();
-                    if has_ptr_meta(self.db, derefed_ty.clone()) {
+                    if has_ptr_meta(self.db(), derefed_ty.clone()) {
                         let (addr, meta) = self.load_scalar_pair(kind, ty.clone());
                         kind = PlaceKind::Addr(Pointer::new(addr), Some(meta))
                     } else {
@@ -1003,7 +1188,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         hir_ty::layout::Variants::Multiple { variants, .. } => {
                             &variants[match field_id.parent {
                                 hir_def::VariantId::EnumVariantId(it) => {
-                                    RustcEnumVariantIdx(it.lookup(self.db).index as usize)
+                                    RustcEnumVariantIdx(it.lookup(self.db()).index as usize)
                                 }
                                 _ => panic!("multiple variants in non-enum"),
                             }]
@@ -1012,8 +1197,8 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                     };
                     let idx = u32::from(field_id.local_id.into_raw()) as usize;
                     let (_, subst) = ty.as_adt().expect("non-adt field access");
-                    ty = self.db.field_types(field_id.parent)[field_id.local_id]
-                        .instantiate(self.interner, subst);
+                    ty = self.db().field_types(field_id.parent)[field_id.local_id]
+                        .instantiate(self.compilation.interner, subst);
                     let offset = layout.fields.offset(idx).bytes_usize();
                     match kind {
                         PlaceKind::Variable(var) => {
@@ -1073,9 +1258,9 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
             PlaceKind::Addr(pointer, None) => {
                 let layout = self.ty_layout(ty.clone());
                 let clif_ty = match layout.backend_repr {
-                    BackendRepr::Scalar(scalar) => translate_scalar_type(scalar, self.module.isa()),
+                    BackendRepr::Scalar(scalar) => translate_scalar_type(scalar, self.isa()),
                     BackendRepr::SimdVector { element, count } => {
-                        translate_scalar_type(element, self.module.isa())
+                        translate_scalar_type(element, self.isa())
                             .by(u32::try_from(count).unwrap())
                             .unwrap()
                     }
@@ -1099,10 +1284,10 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                     BackendRepr::ScalarPair(a, b) => (a, b),
                     _ => unreachable!("load_scalar_pair({:?})", layout.backend_repr),
                 };
-                let tdl = self.db.target_data_layout(self.env.krate).unwrap();
+                let tdl = self.db().target_data_layout(self.env.krate).unwrap();
                 let b_offset = scalar_pair_calculate_b_offset(&tdl, a_scalar, b_scalar);
-                let clif_ty1 = translate_scalar_type(a_scalar, self.module.isa());
-                let clif_ty2 = translate_scalar_type(b_scalar, self.module.isa());
+                let clif_ty1 = translate_scalar_type(a_scalar, self.isa());
+                let clif_ty2 = translate_scalar_type(b_scalar, self.isa());
                 let flags = MemFlags::trusted();
                 let val1 = pointer.load(self, clif_ty1, flags);
                 let val2 = pointer.offset(self, b_offset).load(self, clif_ty2, flags);
@@ -1179,7 +1364,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                         let BackendRepr::ScalarPair(s1, s2) = layout.backend_repr else {
                             panic!("wrong layout of scalar pair: {:?}", layout.backend_repr)
                         };
-                        let tdl = self.db.target_data_layout(self.env.krate).unwrap();
+                        let tdl = self.db().target_data_layout(self.env.krate).unwrap();
                         let off2 = scalar_pair_calculate_b_offset(&tdl, s1, s2);
                         pointer.store(self, val1, MemFlags::trusted());
                         pointer.offset(self, off2).store(self, val2, MemFlags::trusted());
@@ -1199,15 +1384,15 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
 
     fn get_variable(&mut self, local: LocalId<'db>) -> PlaceKind {
         let typ = self.body.locals[local].ty.clone();
+        let db = self.compilation.db();
+        let isa = self.compilation.module.isa();
         let variable = *self.variables.entry(local).or_insert_with(|| {
             // FIXME error handling here!
-            let layout = self
-                .db
-                .layout_of_ty(typ.clone(), self.env.clone())
-                .expect("failed to lay out type");
+            let layout =
+                db.layout_of_ty(typ.clone(), self.env.clone()).expect("failed to lay out type");
             let needs_stack = !layout.uninhabited
                 && (self.referenced_locals.contains(&local)
-                    || drop::needs_drop(self.db, &typ)
+                    || drop::needs_drop(db, &typ)
                     || matches!(layout.backend_repr, BackendRepr::Memory { .. }));
             if needs_stack {
                 if !layout.is_sized() {
@@ -1224,12 +1409,12 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 PlaceKind::Addr(Pointer::dangling(layout.unadjusted_abi_align), None)
             } else if let BackendRepr::Scalar(scalar) = layout.backend_repr {
                 let var = Variable::new(local.into_raw().into_u32() as usize * 2);
-                let typ = translate_scalar_type(scalar, self.module.isa());
+                let typ = translate_scalar_type(scalar, isa);
                 self.builder.declare_var(var, typ);
                 PlaceKind::Variable(var)
             } else if let BackendRepr::ScalarPair(scalar1, scalar2) = layout.backend_repr {
-                let typ1 = translate_scalar_type(scalar1, self.module.isa());
-                let typ2 = translate_scalar_type(scalar2, self.module.isa());
+                let typ1 = translate_scalar_type(scalar1, isa);
+                let typ2 = translate_scalar_type(scalar2, isa);
                 let var1 = Variable::new(local.into_raw().into_u32() as usize * 2);
                 let var2 = Variable::new(local.into_raw().into_u32() as usize * 2 + 1);
                 self.builder.declare_var(var1, typ1);
@@ -1254,9 +1439,9 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
             }
             OperandKind::Static(static_id) => {
                 let (global_value, ty) = self.get_static(*static_id);
-                let addr =
-                    self.builder.ins().global_value(self.module.isa().pointer_type(), global_value);
-                let ptr_ty = Ty::new(self.interner, TyKind::RawPtr(ty, Mutability::Mut));
+                let addr = self.builder.ins().global_value(self.pointer_type, global_value);
+                let ptr_ty =
+                    Ty::new(self.compilation.interner, TyKind::RawPtr(ty, Mutability::Mut));
                 (ValueKind::Primitive(addr), ptr_ty)
             }
         }
@@ -1275,14 +1460,15 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
             MemoryMap::Empty => None,
             MemoryMap::Simple(bytes) => {
                 let data = self
-                    .module
+                    .module()
                     .declare_anonymous_data(false, false)
                     .expect("failed to create data");
                 let mut desc = DataDescription::new();
                 desc.define(bytes.clone());
-                self.module.define_data(data, &desc).expect("failed to define data");
-                let global = self.module.declare_data_in_func(data, &mut self.builder.func);
-                let ptr_type = self.module.isa().pointer_type();
+                self.module().define_data(data, &desc).expect("failed to define data");
+                let global =
+                    self.compilation.module.declare_data_in_func(data, &mut self.builder.func);
+                let ptr_type = self.isa().pointer_type();
                 let addr = self.builder.ins().global_value(ptr_type, global);
                 Some(addr)
             }
@@ -1291,7 +1477,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
         let is_ref = ty.as_reference_or_ptr().is_some();
         let val = match layout.backend_repr {
             BackendRepr::Scalar(scalar) => {
-                let typ = translate_scalar_type(scalar, self.module.isa());
+                let typ = translate_scalar_type(scalar, self.isa());
                 if typ.is_float() {
                     let val = match typ.bytes() {
                         2 => panic!("unimplemented f16 constant"),
@@ -1329,8 +1515,8 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 }
             }
             BackendRepr::ScalarPair(s1, s2) => {
-                let typ1 = translate_scalar_type(s1, self.module.isa());
-                let typ2 = translate_scalar_type(s2, self.module.isa());
+                let typ1 = translate_scalar_type(s1, self.isa());
+                let typ2 = translate_scalar_type(s2, self.isa());
                 let val1 = bytes_to_imm64(&bytes[..typ1.bytes() as usize]);
                 let val1 = if is_ref {
                     let addr = memory_addr.expect("ref const without memory");
@@ -1346,14 +1532,15 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
             }
             BackendRepr::Memory { sized: true } => {
                 let data = self
-                    .module
+                    .module()
                     .declare_anonymous_data(false, false)
                     .expect("failed to create data");
                 let mut desc = DataDescription::new();
                 desc.define(bytes.clone());
-                self.module.define_data(data, &desc).expect("failed to define data");
-                let global = self.module.declare_data_in_func(data, &mut self.builder.func);
-                let ptr_type = self.module.isa().pointer_type();
+                self.module().define_data(data, &desc).expect("failed to define data");
+                let global =
+                    self.compilation.module.declare_data_in_func(data, &mut self.builder.func);
+                let ptr_type = self.isa().pointer_type();
                 let addr = self.builder.ins().global_value(ptr_type, global);
                 ValueKind::Aggregate(Pointer::new(addr), None)
             }
@@ -1401,14 +1588,14 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
         let abi = layout.backend_repr;
         match abi {
             BackendRepr::Scalar(scalar) => {
-                let typ = translate_scalar_type(scalar, self.module.isa());
+                let typ = translate_scalar_type(scalar, self.isa());
                 let loaded_val = pointer.load(self, typ, MemFlags::trusted());
                 ValueKind::Primitive(loaded_val)
             }
             BackendRepr::ScalarPair(s1, s2) => {
-                let typ1 = translate_scalar_type(s1, self.module.isa());
-                let typ2 = translate_scalar_type(s2, self.module.isa());
-                let tdl = self.db.target_data_layout(self.env.krate).unwrap();
+                let typ1 = translate_scalar_type(s1, self.isa());
+                let typ2 = translate_scalar_type(s2, self.isa());
+                let tdl = self.db().target_data_layout(self.env.krate).unwrap();
                 let off = scalar_pair_calculate_b_offset(&tdl, s1, s2);
                 let v1 = pointer.load(self, typ1, MemFlags::trusted());
                 let v2 = pointer.offset(self, off).load(self, typ2, MemFlags::trusted());
@@ -1501,11 +1688,11 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
 
     fn ty_layout(&self, ty: Ty) -> Arc<Layout> {
         // FIXME error handling?
-        self.db.layout_of_ty(ty, self.env.clone()).expect("failed layout")
+        self.db().layout_of_ty(ty, self.env.clone()).expect("failed layout")
     }
 
     fn translate_mem_copy(&mut self, dest: Pointer, src: Pointer, size: i32) {
-        let config = self.module.target_config();
+        let config = self.module().target_config();
         let dest = dest.get_addr(self);
         let src = src.get_addr(self);
         self.builder.emit_small_memory_copy(
@@ -1560,7 +1747,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
         destination: Place<'db>,
     ) {
         // FIXME might want to share more/less code with the normal rust call code
-        let function_data = self.db.function_signature(func_id);
+        let function_data = self.db().function_signature(func_id);
         let func_name = function_data.name.as_str();
         match func_name {
             "transmute" => self.translate_transmute(subst, args, destination),
@@ -1611,7 +1798,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
         let Variants::Multiple { tag, tag_encoding, tag_field, .. } = &layout.variants else {
             panic!("load discriminant of non-multi variant")
         };
-        let tag_typ = translate_scalar_type(*tag, self.module.isa());
+        let tag_typ = translate_scalar_type(*tag, self.isa());
         let tag_offset = layout.fields.offset(tag_field.index()).bytes_usize() as i32;
         let tag = match kind {
             PlaceKind::Variable(var) => {
@@ -1632,9 +1819,9 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 let min_tag = niche_start;
                 let max_tag = niche_start
                     .wrapping_add((niche_variants.end().0 - niche_variants.start().0) as u128);
-                let variants = e.enum_variants(self.db);
+                let variants = e.enum_variants(self.db());
                 let untagged_variant_discr = self
-                    .db
+                    .db()
                     .const_eval_discriminant(variants.variants[untagged_variant.0].0)
                     .expect("failed to eval discriminant");
                 let untagged_variant_discr =
@@ -1664,12 +1851,12 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                 let hir_def::VariantId::EnumVariantId(enum_variant_id) = variant_id else {
                     panic!("multiple variants in non-enum")
                 };
-                let variant_idx = enum_variant_id.lookup(self.db).index as usize;
+                let variant_idx = enum_variant_id.lookup(self.db()).index as usize;
                 let rustc_enum_variant_idx = RustcEnumVariantIdx(variant_idx);
-                let discr_typ = translate_scalar_type(*tag, self.module.isa());
+                let discr_typ = translate_scalar_type(*tag, self.isa());
                 // FIXME error handling
                 let mut discriminant = self
-                    .db
+                    .db()
                     .const_eval_discriminant(enum_variant_id)
                     .expect("failed to eval enum discriminant");
                 let have_tag = match tag_encoding {
@@ -1696,7 +1883,7 @@ impl<'a, 'db: 'a> FunctionTranslator<'a, 'db> {
                     self.translate_place_store_with_offset(
                         place,
                         // HACK the type doesn't really matter here
-                        Ty::new_uint(self.interner, UintTy::U128),
+                        Ty::new_uint(self.compilation.interner, UintTy::U128),
                         field_offset.bytes_usize() as i32,
                         discriminant,
                     );
@@ -1791,7 +1978,7 @@ impl ValueKind {
     }
 }
 
-#[salsa::interned]
+#[salsa::interned(debug)]
 pub struct MonoFunction {
     func: FunctionId,
     subst: GenericArgs<'db>,
@@ -1801,7 +1988,7 @@ fn translate_signature<'db>(
     sig: PolyFnSig<'db>,
     isa: &dyn TargetIsa,
     db: &'db dyn HirDatabase,
-    env: &Arc<TraitEnvironment>,
+    krate: Crate,
 ) -> Signature {
     let call_conv = match sig.abi() {
         hir_ty::FnAbi::Rust => CallConv::Fast,
@@ -1811,6 +1998,7 @@ fn translate_signature<'db>(
     // TODO handle C abi better
     let mut signature = Signature::new(call_conv);
     let sig = sig.skip_binder(); // FIXME can we just skip?
+    let env = TraitEnvironment::empty(krate);
     signature.params.extend(
         sig.inputs()
             .iter()

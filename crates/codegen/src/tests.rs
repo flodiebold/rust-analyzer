@@ -31,6 +31,7 @@ fn eval_fn_i32(db: &TestDB, file_id: EditionedFileId) -> Result<i32, String> {
         let engine = JitEngine::new(db);
         let code = engine.jit.lock().unwrap().compile(db, mono_func_id, &engine).unwrap();
         let func = unsafe { std::mem::transmute::<_, fn() -> i32>(code) };
+        eprintln!("Initial compilation done, running...");
         let result = func();
         Ok(result)
     })
@@ -666,7 +667,7 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs shims for tuple constructors"]
 fn test_indirect_call_tuple_constructor() {
     check_i32(
         r#"
@@ -763,6 +764,7 @@ fn test() -> i32 {
 }
 
 #[test]
+#[ignore = "dyn trait not implemented yet"]
 fn test_virtual_call() {
     check_i32(
         r#"
@@ -1027,6 +1029,7 @@ fn test() -> i32 {
 }
 
 #[test]
+#[ignore = "not dropping moved places not implemented yet"]
 fn no_double_drop() {
     check_i32(
         r#"
@@ -1051,7 +1054,6 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
 fn drop_glue() {
     check_i32(
         r#"
@@ -1076,7 +1078,7 @@ fn test() -> i32 {
 }
 
 #[test]
-#[ignore]
+#[ignore = "box not supported yet"]
 fn test_box() {
     // TODO wip
     check_i32(
