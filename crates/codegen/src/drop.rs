@@ -1,5 +1,5 @@
 use chalk_ir::Substitution;
-use cranelift::prelude::{AbiParam, FunctionBuilder, FunctionBuilderContext, InstBuilder};
+use cranelift::prelude::{AbiParam, FunctionBuilder, FunctionBuilderContext, InstBuilder, Type};
 use cranelift_module::{FuncId, Module};
 use hir_def::{lang_item::LangItem, AssocItemId, FunctionId, TraitId};
 use hir_expand::name::Name;
@@ -34,22 +34,67 @@ impl<'a> FunctionTranslator<'a> {
         }
         let mut ctx = self.module.make_context(); // FIXME share (extract ShimCompiler?)
         ctx.func.signature.params.push(AbiParam::new(self.pointer_type));
+        let mut builder_context = FunctionBuilderContext::new(); // FIXME share
+        let builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
 
+        let drop_shim_builder = DropShimBuilder {
+            db: self.db,
+            env: self.env.clone(),
+            builder,
+            module: self.module,
+            drop_in_place_funcs: &mut self.drop_in_place_funcs,
+            pointer_type: self.pointer_type,
+        };
+
+        let id = drop_shim_builder.build_drop_in_place(ty);
+
+        Some(id)
+    }
+}
+
+struct DropShimBuilder<'a> {
+    db: &'a dyn CodegenDatabase,
+    env: Arc<TraitEnvironment>,
+    builder: FunctionBuilder<'a>,
+    module: &'a mut JITModule,
+    drop_in_place_funcs: &'a mut FxHashMap<Option<Ty>, FuncId>,
+    pointer_type: Type,
+    to_build: Vec<(FuncId, Ty)>,
+}
+
+impl<'a> DropShimBuilder<'a> {
+    fn declare_drop_shim(&mut self, ty: Ty) -> FuncId {
         // FIXME can this legitimately fail?
         let id = self
             .module
-            .declare_anonymous_function(&ctx.func.signature)
+            // FIXME assuming everything we build here has the same signature
+            .declare_anonymous_function(&self.builder.func.signature)
             .expect("failed to declare anonymous function for shim");
-
         self.drop_in_place_funcs.insert(Some(ty.clone()), id);
+        self.to_build.push((id, ty));
+        id
+    }
 
-        let mut builder_context = FunctionBuilderContext::new(); // FIXME share
-        let mut builder = FunctionBuilder::new(&mut ctx.func, &mut builder_context);
+    fn build_drop_in_place(&mut self, ty: Ty) -> FuncId {
+        let id = self.declare_drop_shim(ty);
 
-        let block = builder.create_block();
-        builder.append_block_params_for_function_params(block);
-        builder.switch_to_block(block);
-        let param = builder.block_params(block)[0];
+        while let Some((id, ty)) = self.to_build.pop() {
+            self.fill_drop_in_place(ty);
+            // FIXME can this legitimately fail?
+            self.module
+                .define_function(id, &mut ctx)
+                .expect("failed to compile drop_in_place function");
+            self.module.clear_context(&mut ctx);
+            ctx.func.signature.params.push(AbiParam::new(self.pointer_type));
+        }
+        id
+    }
+
+    fn fill_drop_in_place(&mut self, ty: chalk_ir::Ty<Interner>) {
+        let block = self.builder.create_block();
+        self.builder.append_block_params_for_function_params(block);
+        self.builder.switch_to_block(block);
+        let param = self.builder.block_params(block)[0];
 
         // call drop if needed
         let drop_fn = get_drop_fn(self.db.upcast(), &self.env);
@@ -62,22 +107,17 @@ impl<'a> FunctionTranslator<'a> {
                 let func = self.get_shim(
                     self.db.intern_mono_function(MonoFunction { func: drop_fn_impl, subst }),
                 );
-                let func_ref = self.module.declare_func_in_func(func, &mut builder.func);
-                builder.ins().call(func_ref, &[param]);
+                let func_ref = self.module.declare_func_in_func(func, &mut self.builder.func);
+                self.builder.ins().call(func_ref, &[param]);
             }
         }
 
         // TODO: drop fields etc
 
-        builder.ins().return_(&[]);
+        self.builder.ins().return_(&[]);
 
-        builder.seal_all_blocks();
-        builder.finalize();
-        // FIXME can this legitimately fail?
-        self.module
-            .define_function(id, &mut ctx)
-            .expect("failed to compile drop_in_place function");
-        Some(id)
+        self.builder.seal_all_blocks();
+        self.builder.finalize();
     }
 }
 
