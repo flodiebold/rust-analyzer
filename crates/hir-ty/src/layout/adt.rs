@@ -9,7 +9,7 @@ use hir_def::{
     AdtId, VariantId,
 };
 use intern::sym;
-use rustc_index::IndexVec;
+use rustc_index_ap::IndexVec;
 use smallvec::SmallVec;
 use triomphe::Arc;
 

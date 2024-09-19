@@ -7,7 +7,7 @@
 extern crate rustc_index;
 
 #[cfg(not(feature = "in-rust-tree"))]
-extern crate ra_ap_rustc_index as rustc_index;
+extern crate ra_ap_rustc_index as rustc_index_ap;
 
 #[cfg(feature = "in-rust-tree")]
 extern crate rustc_abi;
@@ -46,6 +46,7 @@ pub mod object_safety;
 pub mod primitive;
 pub mod traits;
 
+mod next_solver;
 #[cfg(test)]
 mod test_db;
 #[cfg(test)]

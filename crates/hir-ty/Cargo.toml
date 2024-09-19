@@ -39,6 +39,12 @@ ra-ap-rustc_abi.workspace = true
 ra-ap-rustc_index.workspace = true
 ra-ap-rustc_pattern_analysis.workspace = true
 
+rustc_type_ir = { path = "../../../rust/compiler/rustc_type_ir", default-features = false }
+rustc_ast_ir = { path = "../../../rust/compiler/rustc_ast_ir", default-features = false }
+rustc_next_trait_solver = { path = "../../../rust/compiler/rustc_next_trait_solver", default-features = false }
+rustc_index = { path = "../../../rust/compiler/rustc_index", default-features = false }
+paste = "1.0.15"
+
 
 # local deps
 stdx.workspace = true

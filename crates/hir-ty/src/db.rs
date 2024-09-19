@@ -24,6 +24,7 @@ use crate::{
     lower::{GenericDefaults, GenericPredicates},
     method_resolution::{InherentImpls, TraitImpls, TyFingerprint},
     mir::{BorrowckResult, MirBody, MirLowerError},
+    next_solver,
     object_safety::ObjectSafetyViolation,
     Binders, ClosureId, Const, FnDefId, ImplTraitId, ImplTraits, InferenceResult, Interner,
     PolyFnSig, Substitution, TraitEnvironment, TraitRef, Ty, TyDefId, ValueTyDefId,
@@ -31,7 +32,7 @@ use crate::{
 use hir_expand::name::Name;
 
 #[salsa::query_group(HirDatabaseStorage)]
-pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> {
+pub trait HirDatabase: DefDatabase + Upcast<dyn DefDatabase> + next_solver::RustcInternDb {
     #[salsa::invoke(crate::infer::infer_query)]
     fn infer(&self, def: DefWithBodyId) -> Arc<InferenceResult>;
 
