@@ -7,7 +7,7 @@ use base_db::{
 use hir_def::hir::PatId;
 use rustc_type_ir::{
     relate::Relate,
-    solve::{ExternalConstraintsData, PredefinedOpaquesData},
+    solve::{ExternalConstraintsData, PredefinedOpaquesData, Reveal},
     Binder, BoundVar, CanonicalVarInfo, EarlyBinder, ExistentialPredicate, Interner, RegionKind,
     UniverseIndex, Variance,
 };
@@ -288,7 +288,7 @@ impl Interner for DbInterner {
     fn mk_tracked<T: std::fmt::Debug + Clone>(
         self,
         data: T,
-        dep_node: Self::DepNodeIndex,
+        _dep_node: Self::DepNodeIndex,
     ) -> Self::Tracked<T> {
         data
     }
@@ -299,6 +299,19 @@ impl Interner for DbInterner {
 
     fn with_cached_task<T>(self, task: impl FnOnce() -> T) -> (T, Self::DepNodeIndex) {
         (task(), ())
+    }
+
+    fn with_global_cache<R>(
+        self,
+        mode: rustc_type_ir::solve::SolverMode,
+        f: impl FnOnce(&mut rustc_type_ir::search_graph::GlobalCache<Self>) -> R,
+    ) -> R {
+        let mut cache = Default::default();
+        f(&mut cache)
+    }
+
+    fn evaluation_is_concurrent(&self) -> bool {
+        false
     }
 
     type Ty = Ty;
@@ -334,20 +347,9 @@ impl Interner for DbInterner {
     type Clause = Clause;
     type Clauses = Clauses;
 
-    fn with_global_cache<R>(
-        self,
-        mode: rustc_type_ir::solve::SolverMode,
-        f: impl FnOnce(&mut rustc_type_ir::search_graph::GlobalCache<Self>) -> R,
-    ) -> R {
-        todo!()
-    }
-
-    fn evaluation_is_concurrent(&self) -> bool {
-        todo!()
-    }
-
     fn expand_abstract_consts<T: rustc_type_ir::fold::TypeFoldable<Self>>(self, t: T) -> T {
-        todo!()
+        // TODO
+        t
     }
 
     type GenericsOf = Generics;
@@ -860,8 +862,12 @@ pub struct ValueConst;
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct ExprConst;
 
+// We could cram the reveal into the clauses like rustc does, probably
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct ParamEnv;
+pub struct ParamEnv {
+    pub(super) reveal: Reveal,
+    pub(super) clauses: Clauses,
+}
 
 pub struct Generics;
 

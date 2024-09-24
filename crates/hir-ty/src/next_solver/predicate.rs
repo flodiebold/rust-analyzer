@@ -2,7 +2,7 @@ use rustc_type_ir::{
     self as ty,
     elaborate::Elaboratable,
     fold::{TypeFoldable, TypeSuperFoldable},
-    inherent::IntoKind,
+    inherent::{IntoKind, SliceLike},
     relate::Relate,
     visit::{Flags, TypeSuperVisitable, TypeVisitable},
     Binder, ClauseKind, PredicateKind, UpcastFrom,
@@ -61,13 +61,13 @@ impl TypeFoldable<DbInterner> for ParamEnv {
 
 impl rustc_type_ir::inherent::ParamEnv<DbInterner> for ParamEnv {
     fn reveal(self) -> rustc_type_ir::solve::Reveal {
-        todo!()
+        self.reveal
     }
 
     fn caller_bounds(
         self,
     ) -> impl IntoIterator<Item = <DbInterner as rustc_type_ir::Interner>::Clause> {
-        [todo!()]
+        self.clauses.iter()
     }
 }
 
