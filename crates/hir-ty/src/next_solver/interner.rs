@@ -116,15 +116,15 @@ macro_rules! interned_struct {
 
 macro_rules! salsa_intern_things {
     ($($name:ident),+) => {
-                paste::paste! {
-        #[salsa::query_group(RustcInternDatabaseStorage)]
-        pub trait RustcInternDb {
-            $(
-                    #[salsa::interned]
-                    fn [<intern_rustc_ $name:snake>](&self, content: self::[<Interned $name>]) -> self::$name;
-            )*
+        paste::paste! {
+            #[salsa::query_group(RustcInternDatabaseStorage)]
+            pub trait RustcInternDb {
+                $(
+                        #[salsa::interned]
+                        fn [<intern_rustc_ $name:snake>](&self, content: self::[<Interned $name>]) -> self::$name;
+                )*
+            }
         }
-                }
     }
 }
 
@@ -689,13 +689,13 @@ impl BoundVarKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)] // FIXME implement by hand
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)] // FIXME implement Debug by hand
 pub struct ParamTy {
     pub index: u32,
     pub name: Symbol,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] // FIXME implement by hand
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] // FIXME implement Debug by hand
 pub struct BoundTy {
     pub var: rustc_type_ir::BoundVar,
     pub kind: BoundTyKind,
@@ -707,7 +707,7 @@ pub enum BoundTyKind {
     Param(DefId, Symbol),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)] // FIXME implement by hand
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)] // FIXME implement Debug by hand
 pub struct Placeholder<T> {
     pub universe: UniverseIndex,
     pub bound: T,
@@ -854,6 +854,7 @@ impl rustc_type_ir::inherent::ParamLike for ParamConst {
     }
 }
 
+// TODO define these
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct ValueConst;
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]

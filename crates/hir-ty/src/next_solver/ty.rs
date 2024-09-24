@@ -6,7 +6,10 @@ use rustc_type_ir::{
     TyKind,
 };
 
-use super::{with_db_out_of_thin_air, BoundTy, BoundVarKind, DbInterner, InternedTy, ParamTy, PlaceholderType, Ty, Tys};
+use super::{
+    with_db_out_of_thin_air, BoundTy, BoundTyKind, BoundVarKind, DbInterner, ErrorGuaranteed,
+    GenericArgs, InternedTy, ParamTy, PlaceholderType, Ty, Tys,
+};
 
 impl IntoKind for Ty {
     type Kind = TyKind<DbInterner>;
@@ -73,8 +76,9 @@ impl Flags for Ty {
 }
 
 impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
+    // FIXME: these could be stored directly for performance like rustc does
     fn new_unit(interner: DbInterner) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Tuple(Default::default()))
     }
 
     fn new_bool(interner: DbInterner) -> Self {
@@ -86,37 +90,31 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
     }
 
     fn new_usize(interner: DbInterner) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Uint(rustc_type_ir::UintTy::Usize))
     }
 
     fn new_infer(interner: DbInterner, var: rustc_type_ir::InferTy) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Infer(var))
     }
 
     fn new_var(interner: DbInterner, var: rustc_type_ir::TyVid) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Infer(rustc_type_ir::InferTy::TyVar(var)))
     }
 
-    fn new_param(
-        interner: DbInterner,
-        param: <DbInterner as rustc_type_ir::Interner>::ParamTy,
-    ) -> Self {
-        todo!()
+    fn new_param(interner: DbInterner, param: ParamTy) -> Self {
+        interner.mk_ty(TyKind::Param(param))
     }
 
-    fn new_placeholder(
-        interner: DbInterner,
-        param: <DbInterner as rustc_type_ir::Interner>::PlaceholderTy,
-    ) -> Self {
-        todo!()
+    fn new_placeholder(interner: DbInterner, param: PlaceholderType) -> Self {
+        interner.mk_ty(TyKind::Placeholder(param))
     }
 
     fn new_bound(
         interner: DbInterner,
         debruijn: rustc_type_ir::DebruijnIndex,
-        var: <DbInterner as rustc_type_ir::Interner>::BoundTy,
+        var: BoundTy,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Bound(debruijn, var))
     }
 
     fn new_anon_bound(
@@ -124,7 +122,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         debruijn: rustc_type_ir::DebruijnIndex,
         var: rustc_type_ir::BoundVar,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Bound(debruijn, BoundTy { var, kind: BoundTyKind::Anon }))
     }
 
     fn new_alias(
@@ -132,22 +130,19 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         kind: rustc_type_ir::AliasTyKind,
         alias_ty: rustc_type_ir::AliasTy<DbInterner>,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Alias(kind, alias_ty))
     }
 
-    fn new_error(
-        interner: DbInterner,
-        guar: <DbInterner as rustc_type_ir::Interner>::ErrorGuaranteed,
-    ) -> Self {
-        todo!()
+    fn new_error(interner: DbInterner, guar: ErrorGuaranteed) -> Self {
+        interner.mk_ty(TyKind::Error(guar))
     }
 
     fn new_adt(
         interner: DbInterner,
         adt_def: <DbInterner as rustc_type_ir::Interner>::AdtDef,
-        args: <DbInterner as rustc_type_ir::Interner>::GenericArgs,
+        args: GenericArgs,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Adt(adt_def, args))
     }
 
     fn new_foreign(
