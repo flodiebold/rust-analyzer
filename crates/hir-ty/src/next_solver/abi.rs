@@ -2,7 +2,13 @@ use rustc_type_ir::{error::TypeError, relate::Relate};
 
 use crate::FnAbi;
 
-use super::{DbInterner, Safety};
+use super::DbInterner;
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Safety {
+    Unsafe,
+    Safe,
+}
 
 impl Relate<DbInterner> for Safety {
     fn relate<R: rustc_type_ir::relate::TypeRelation<DbInterner>>(

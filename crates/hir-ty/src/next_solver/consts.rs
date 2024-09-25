@@ -6,7 +6,34 @@ use rustc_type_ir::{
     ConstKind,
 };
 
-use super::{Const, DbInterner, ExprConst, PlaceholderConst};
+use super::{DbInterner, Placeholder, Symbol};
+
+interned_struct!(Const, rustc_type_ir::ConstKind<DbInterner>);
+
+pub type PlaceholderConst = Placeholder<BoundConst>;
+
+#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)] // FIXME implement manually
+pub struct ParamConst {
+    pub index: u32,
+    pub name: Symbol,
+}
+
+// TODO define these
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ValueConst;
+#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+pub struct ExprConst;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] // FIXME implement Debug by hand
+pub struct BoundConst {
+    pub var: rustc_type_ir::BoundVar,
+}
+
+impl rustc_type_ir::inherent::ParamLike for ParamConst {
+    fn index(self) -> u32 {
+        self.index
+    }
+}
 
 impl IntoKind for Const {
     type Kind = ConstKind<DbInterner>;
@@ -129,7 +156,7 @@ impl PlaceholderLike for PlaceholderConst {
     }
 
     fn var(self) -> rustc_type_ir::BoundVar {
-        self.bound
+        self.bound.var
     }
 
     fn with_updated_universe(self, ui: rustc_type_ir::UniverseIndex) -> Self {

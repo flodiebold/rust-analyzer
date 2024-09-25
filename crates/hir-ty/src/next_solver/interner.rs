@@ -1,30 +1,40 @@
 use std::marker::PhantomData;
 
-use base_db::{
-    impl_intern_key,
-    salsa::{self, InternId, InternValueTrivial},
-};
+use base_db::salsa::{self, InternId};
 use hir_def::hir::PatId;
 use rustc_type_ir::{
     relate::Relate,
-    solve::{ExternalConstraintsData, PredefinedOpaquesData, Reveal},
-    Binder, BoundVar, CanonicalVarInfo, EarlyBinder, ExistentialPredicate, Interner, RegionKind,
-    UniverseIndex, Variance,
+    solve::{ExternalConstraintsData, PredefinedOpaquesData},
+    Binder, BoundVar, CanonicalVarInfo, EarlyBinder, Interner, UniverseIndex, Variance,
 };
 use scoped_tls::scoped_thread_local;
 
 use crate::{db::HirDatabase, FnAbi};
+
+use super::{
+    consts::InternedConst,
+    generic_arg::InternedGenericArgs,
+    predicate::{
+        InternedBoundExistentialPredicates, InternedClause, InternedClauses, InternedPredicate,
+    },
+    ty::{InternedTy, InternedTys},
+    BoundExistentialPredicate, BoundExistentialPredicates, BoundRegion, BoundRegionKind, BoundTy,
+    BoundTyKind, Clause, Clauses, Const, EarlyParamRegion, ErrorGuaranteed, ExprConst, GenericArg,
+    GenericArgs, GenericArgsSlice, LateParamRegion, ParamConst, ParamEnv, ParamTy,
+    PlaceholderConst, PlaceholderRegion, PlaceholderTy, Predicate, Region, Safety, Symbol, Term,
+    Ty, Tys, TysSlice, ValueConst,
+};
 
 macro_rules! interned_vec {
     ($name:ident, $ty:ty) => {
         paste::paste! {
             #[derive(Debug, Clone, PartialEq, Eq, Hash)]
             pub struct [<Interned $name>](Vec<$ty>);
-            impl InternValueTrivial for [<Interned $name>] {}
+            impl base_db::salsa::InternValueTrivial for [<Interned $name>] {}
 
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-            pub struct $name(salsa::InternId);
-            impl_intern_key!($name);
+            pub struct $name(base_db::salsa::InternId);
+            base_db::impl_intern_key!($name);
 
             impl rustc_type_ir::inherent::SliceLike for $name {
                 type Item = $ty;
@@ -101,11 +111,11 @@ macro_rules! interned_struct {
         paste::paste! {
             #[derive(Debug, Clone, PartialEq, Eq, Hash)]
             pub struct [<Interned $name>]($ty);
-            impl InternValueTrivial for [<Interned $name>] {}
+            impl base_db::salsa::InternValueTrivial for [<Interned $name>] {}
 
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-            pub struct $name(salsa::InternId);
-            impl_intern_key!($name);
+            pub struct $name(base_db::salsa::InternId);
+            base_db::impl_intern_key!($name);
 
             impl [<Interned $name>] {
                 pub(super) fn inner(self) -> $ty { self.0 }
@@ -145,21 +155,6 @@ salsa_intern_things![
     Variances
 ];
 
-interned_vec!(GenericArgs, GenericArg, slice);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum GenericArg {
-    Ty(Ty),
-    Lifetime(Region),
-    Const(Const),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Term {
-    Ty(Ty),
-    Const(Const),
-}
-
 interned_vec!(BoundVarKinds, BoundVarKind);
 
 interned_struct!(PredefinedOpaques, PredefinedOpaquesData<DbInterner>);
@@ -167,18 +162,6 @@ interned_struct!(PredefinedOpaques, PredefinedOpaquesData<DbInterner>);
 interned_vec!(DefiningOpaqueTypes, DefId);
 interned_vec!(CanonicalVars, CanonicalVarInfo<DbInterner>);
 interned_struct!(ExternalConstraints, ExternalConstraintsData<DbInterner>);
-
-interned_struct!(Ty, rustc_type_ir::TyKind<DbInterner>);
-interned_vec!(Tys, Ty, slice);
-
-interned_vec!(BoundExistentialPredicates, BoundExistentialPredicate);
-
-interned_struct!(Const, rustc_type_ir::ConstKind<DbInterner>);
-
-interned_struct!(Predicate, rustc_type_ir::Binder<DbInterner, rustc_type_ir::PredicateKind<DbInterner>>);
-
-interned_struct!(Clause, rustc_type_ir::Binder<DbInterner, rustc_type_ir::ClauseKind<DbInterner>>);
-interned_vec!(Clauses, Clause);
 
 interned_vec!(Variances, Variance);
 
@@ -319,7 +302,7 @@ impl Interner for DbInterner {
     type FnInputTys = TysSlice;
     type ParamTy = ParamTy;
     type BoundTy = BoundTy;
-    type PlaceholderTy = PlaceholderType;
+    type PlaceholderTy = PlaceholderTy;
 
     type ErrorGuaranteed = ErrorGuaranteed;
     type BoundExistentialPredicates = BoundExistentialPredicates;
@@ -624,12 +607,6 @@ impl Interner for DbInterner {
     }
 }
 
-impl DbInterner {
-    pub(super) fn mk_ty(self, kind: rustc_type_ir::TyKind<DbInterner>) -> Ty {
-        self.with_db(|db| db.intern_rustc_ty(InternedTy(kind)))
-    }
-}
-
 scoped_thread_local!(static DB: *const dyn HirDatabase);
 
 // TODO: think about safety here
@@ -658,8 +635,6 @@ pub(super) fn with_db_out_of_thin_air<T>(f: impl FnOnce(&dyn HirDatabase) -> T) 
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Span;
-
-pub type BoundExistentialPredicate = Binder<DbInterner, ExistentialPredicate<DbInterner>>;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum BoundVarKind {
@@ -691,183 +666,13 @@ impl BoundVarKind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)] // FIXME implement Debug by hand
-pub struct ParamTy {
-    pub index: u32,
-    pub name: Symbol,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] // FIXME implement Debug by hand
-pub struct BoundTy {
-    pub var: rustc_type_ir::BoundVar,
-    pub kind: BoundTyKind,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum BoundTyKind {
-    Anon,
-    Param(DefId, Symbol),
-}
-
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)] // FIXME implement Debug by hand
 pub struct Placeholder<T> {
     pub universe: UniverseIndex,
     pub bound: T,
 }
 
-pub type PlaceholderType = Placeholder<BoundTy>;
-pub type PlaceholderRegion = Placeholder<BoundRegion>;
-pub type PlaceholderConst = Placeholder<BoundVar>;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Region {
-    pub kind: RegionKind<DbInterner>,
-}
-
 pub(crate) type DebruijnIndex = u32;
-
-type Symbol = ();
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct EarlyParamRegion {
-    pub index: u32,
-    pub name: Symbol,
-}
-
-impl rustc_type_ir::inherent::ParamLike for EarlyParamRegion {
-    fn index(self) -> u32 {
-        self.index
-    }
-}
-
-impl std::fmt::Debug for EarlyParamRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#{}", self.index)
-        // write!(f, "{}/#{}", self.name, self.index)
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement manually
-/// The parameter representation of late-bound function parameters, "some region
-/// at least as big as the scope `fr.scope`".
-///
-/// Similar to a placeholder region as we create `LateParam` regions when entering a binder
-/// except they are always in the root universe and instead of using a boundvar to distinguish
-/// between others we use the `DefId` of the parameter. For this reason the `bound_region` field
-/// should basically always be `BoundRegionKind::BrNamed` as otherwise there is no way of telling
-/// different parameters apart.
-pub struct LateParamRegion {
-    pub scope: DefId,
-    pub bound_region: BoundRegionKind,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement manually
-pub enum BoundRegionKind {
-    /// An anonymous region parameter for a given fn (&T)
-    BrAnon,
-
-    /// Named region parameters for functions (a in &'a T)
-    ///
-    /// The `DefId` is needed to distinguish free regions in
-    /// the event of shadowing.
-    BrNamed(DefId, Symbol),
-
-    /// Anonymous region for the implicit env pointer parameter
-    /// to a closure
-    BrEnv,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct BoundRegion {
-    pub var: BoundVar,
-    pub kind: BoundRegionKind,
-}
-
-impl rustc_type_ir::inherent::BoundVarLike<DbInterner> for BoundRegion {
-    fn var(self) -> BoundVar {
-        self.var
-    }
-
-    fn assert_eq(self, var: BoundVarKind) {
-        assert_eq!(self.kind, var.expect_region())
-    }
-}
-
-impl core::fmt::Debug for BoundRegion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.kind {
-            BoundRegionKind::BrAnon => write!(f, "{:?}", self.var),
-            BoundRegionKind::BrEnv => write!(f, "{:?}.Env", self.var),
-            BoundRegionKind::BrNamed(def, symbol) => {
-                write!(f, "{:?}.Named({:?}, {:?})", self.var, def, symbol)
-            }
-        }
-    }
-}
-
-impl BoundRegionKind {
-    pub fn is_named(&self) -> bool {
-        match *self {
-            BoundRegionKind::BrNamed(_, name) => {
-                true
-                // name != kw::UnderscoreLifetime && name != kw::Empty
-            }
-            _ => false,
-        }
-    }
-
-    pub fn get_name(&self) -> Option<Symbol> {
-        if self.is_named() {
-            match *self {
-                BoundRegionKind::BrNamed(_, name) => return Some(name),
-                _ => unreachable!(),
-            }
-        }
-
-        None
-    }
-
-    pub fn get_id(&self) -> Option<DefId> {
-        match *self {
-            BoundRegionKind::BrNamed(id, _) => Some(id),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct ErrorGuaranteed;
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum Safety {
-    Unsafe,
-    Safe,
-}
-
-#[derive(Copy, Clone, Hash, Eq, PartialEq, Ord, PartialOrd, Debug)] // FIXME implement manually
-pub struct ParamConst {
-    pub index: u32,
-    pub name: Symbol,
-}
-
-impl rustc_type_ir::inherent::ParamLike for ParamConst {
-    fn index(self) -> u32 {
-        self.index
-    }
-}
-
-// TODO define these
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub struct ValueConst;
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
-pub struct ExprConst;
-
-// We could cram the reveal into the clauses like rustc does, probably
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct ParamEnv {
-    pub(super) reveal: Reveal,
-    pub(super) clauses: Clauses,
-}
 
 pub struct Generics;
 

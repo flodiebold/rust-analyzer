@@ -7,9 +7,34 @@ use rustc_type_ir::{
 };
 
 use super::{
-    with_db_out_of_thin_air, BoundTy, BoundTyKind, BoundVarKind, DbInterner, ErrorGuaranteed,
-    GenericArgs, InternedTy, ParamTy, PlaceholderType, Ty, Tys,
+    with_db_out_of_thin_air, BoundVarKind, DbInterner, DefId, GenericArgs, Placeholder, Symbol,
 };
+
+interned_struct!(Ty, rustc_type_ir::TyKind<DbInterner>);
+interned_vec!(Tys, Ty, slice);
+
+pub type PlaceholderTy = Placeholder<BoundTy>;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)] // FIXME implement Debug by hand
+pub struct ParamTy {
+    pub index: u32,
+    pub name: Symbol,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] // FIXME implement Debug by hand
+pub struct BoundTy {
+    pub var: rustc_type_ir::BoundVar,
+    pub kind: BoundTyKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum BoundTyKind {
+    Anon,
+    Param(DefId, Symbol),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ErrorGuaranteed;
 
 impl IntoKind for Ty {
     type Kind = TyKind<DbInterner>;
@@ -75,6 +100,12 @@ impl Flags for Ty {
     }
 }
 
+impl DbInterner {
+    fn mk_ty(self, kind: rustc_type_ir::TyKind<DbInterner>) -> Ty {
+        self.with_db(|db| db.intern_rustc_ty(InternedTy(kind)))
+    }
+}
+
 impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
     // FIXME: these could be stored directly for performance like rustc does
     fn new_unit(interner: DbInterner) -> Self {
@@ -105,7 +136,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         interner.mk_ty(TyKind::Param(param))
     }
 
-    fn new_placeholder(interner: DbInterner, param: PlaceholderType) -> Self {
+    fn new_placeholder(interner: DbInterner, param: PlaceholderTy) -> Self {
         interner.mk_ty(TyKind::Placeholder(param))
     }
 
@@ -307,7 +338,7 @@ impl BoundVarLike<DbInterner> for BoundTy {
     }
 }
 
-impl PlaceholderLike for PlaceholderType {
+impl PlaceholderLike for PlaceholderTy {
     fn universe(self) -> rustc_type_ir::UniverseIndex {
         self.universe
     }

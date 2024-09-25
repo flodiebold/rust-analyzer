@@ -3,7 +3,22 @@ use rustc_type_ir::{
     TermKind,
 };
 
-use super::{Const, DbInterner, GenericArg, GenericArgs, Region, Term, Ty};
+use super::{Const, DbInterner, Region, Ty};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GenericArg {
+    Ty(Ty),
+    Lifetime(Region),
+    Const(Const),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Term {
+    Ty(Ty),
+    Const(Const),
+}
+
+interned_vec!(GenericArgs, GenericArg, slice);
 
 impl From<Ty> for GenericArg {
     fn from(value: Ty) -> Self {

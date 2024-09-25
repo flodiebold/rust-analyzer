@@ -3,10 +3,124 @@ use rustc_type_ir::{
     inherent::{IntoKind, PlaceholderLike},
     relate::Relate,
     visit::{Flags, TypeVisitable},
-    RegionKind,
+    BoundVar, RegionKind,
 };
 
-use super::{DbInterner, PlaceholderRegion, Region};
+use super::{BoundVarKind, DbInterner, DefId, Placeholder, Symbol};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct Region {
+    pub kind: RegionKind<DbInterner>,
+}
+
+pub type PlaceholderRegion = Placeholder<BoundRegion>;
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct EarlyParamRegion {
+    pub index: u32,
+    pub name: Symbol,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement manually
+/// The parameter representation of late-bound function parameters, "some region
+/// at least as big as the scope `fr.scope`".
+///
+/// Similar to a placeholder region as we create `LateParam` regions when entering a binder
+/// except they are always in the root universe and instead of using a boundvar to distinguish
+/// between others we use the `DefId` of the parameter. For this reason the `bound_region` field
+/// should basically always be `BoundRegionKind::BrNamed` as otherwise there is no way of telling
+/// different parameters apart.
+pub struct LateParamRegion {
+    pub scope: DefId,
+    pub bound_region: BoundRegionKind,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement manually
+pub enum BoundRegionKind {
+    /// An anonymous region parameter for a given fn (&T)
+    BrAnon,
+
+    /// Named region parameters for functions (a in &'a T)
+    ///
+    /// The `DefId` is needed to distinguish free regions in
+    /// the event of shadowing.
+    BrNamed(DefId, Symbol),
+
+    /// Anonymous region for the implicit env pointer parameter
+    /// to a closure
+    BrEnv,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct BoundRegion {
+    pub var: BoundVar,
+    pub kind: BoundRegionKind,
+}
+
+impl rustc_type_ir::inherent::ParamLike for EarlyParamRegion {
+    fn index(self) -> u32 {
+        self.index
+    }
+}
+
+impl std::fmt::Debug for EarlyParamRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{}", self.index)
+        // write!(f, "{}/#{}", self.name, self.index)
+    }
+}
+
+impl rustc_type_ir::inherent::BoundVarLike<DbInterner> for BoundRegion {
+    fn var(self) -> BoundVar {
+        self.var
+    }
+
+    fn assert_eq(self, var: BoundVarKind) {
+        assert_eq!(self.kind, var.expect_region())
+    }
+}
+
+impl core::fmt::Debug for BoundRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            BoundRegionKind::BrAnon => write!(f, "{:?}", self.var),
+            BoundRegionKind::BrEnv => write!(f, "{:?}.Env", self.var),
+            BoundRegionKind::BrNamed(def, symbol) => {
+                write!(f, "{:?}.Named({:?}, {:?})", self.var, def, symbol)
+            }
+        }
+    }
+}
+
+impl BoundRegionKind {
+    pub fn is_named(&self) -> bool {
+        match *self {
+            BoundRegionKind::BrNamed(_, name) => {
+                true
+                // name != kw::UnderscoreLifetime && name != kw::Empty
+            }
+            _ => false,
+        }
+    }
+
+    pub fn get_name(&self) -> Option<Symbol> {
+        if self.is_named() {
+            match *self {
+                BoundRegionKind::BrNamed(_, name) => return Some(name),
+                _ => unreachable!(),
+            }
+        }
+
+        None
+    }
+
+    pub fn get_id(&self) -> Option<DefId> {
+        match *self {
+            BoundRegionKind::BrNamed(id, _) => Some(id),
+            _ => None,
+        }
+    }
+}
 
 impl IntoKind for Region {
     type Kind = RegionKind<DbInterner>;

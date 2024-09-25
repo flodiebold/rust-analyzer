@@ -4,13 +4,28 @@ use rustc_type_ir::{
     fold::{TypeFoldable, TypeSuperFoldable},
     inherent::{IntoKind, SliceLike},
     relate::Relate,
+    solve::Reveal,
     visit::{Flags, TypeSuperVisitable, TypeVisitable},
-    Binder, ClauseKind, PredicateKind, UpcastFrom,
+    ClauseKind, ExistentialPredicate, PredicateKind, UpcastFrom,
 };
 
-use super::{
-    BoundExistentialPredicates, Clause, Clauses, DbInterner, ParamEnv, Predicate, Region, Ty,
-};
+use super::{Binder, DbInterner, Region, Ty};
+
+pub type BoundExistentialPredicate = Binder<ExistentialPredicate<DbInterner>>;
+
+interned_vec!(BoundExistentialPredicates, BoundExistentialPredicate);
+
+interned_struct!(Predicate, Binder<rustc_type_ir::PredicateKind<DbInterner>>);
+
+interned_struct!(Clause, Binder<rustc_type_ir::ClauseKind<DbInterner>>);
+interned_vec!(Clauses, Clause);
+
+// We could cram the reveal into the clauses like rustc does, probably
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct ParamEnv {
+    pub(super) reveal: Reveal,
+    pub(super) clauses: Clauses,
+}
 
 impl rustc_type_ir::inherent::BoundExistentialPredicates<DbInterner>
     for BoundExistentialPredicates
@@ -141,7 +156,7 @@ impl Flags for Predicate {
 }
 
 impl IntoKind for Predicate {
-    type Kind = Binder<DbInterner, PredicateKind<DbInterner>>;
+    type Kind = Binder<PredicateKind<DbInterner>>;
 
     fn kind(self) -> Self::Kind {
         todo!()
@@ -246,7 +261,7 @@ impl TypeFoldable<DbInterner> for Clause {
 }
 
 impl IntoKind for Clause {
-    type Kind = Binder<DbInterner, ClauseKind<DbInterner>>;
+    type Kind = Binder<ClauseKind<DbInterner>>;
 
     fn kind(self) -> Self::Kind {
         todo!()
