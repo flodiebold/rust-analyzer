@@ -14,9 +14,7 @@ use crate::{db::HirDatabase, FnAbi};
 use super::{
     consts::InternedConst,
     generic_arg::InternedGenericArgs,
-    predicate::{
-        InternedBoundExistentialPredicates, InternedClause, InternedClauses, InternedPredicate,
-    },
+    predicate::{InternedBoundExistentialPredicates, InternedClauses, InternedPredicate},
     ty::{InternedTy, InternedTys},
     BoundExistentialPredicate, BoundExistentialPredicates, BoundRegion, BoundRegionKind, BoundTy,
     BoundTyKind, Clause, Clauses, Const, EarlyParamRegion, ErrorGuaranteed, ExprConst, GenericArg,
@@ -48,6 +46,13 @@ macro_rules! interned_vec {
                 fn as_slice(&self) -> &[Self::Item] {
                     todo!()
                 }
+            }
+
+            impl IntoIterator for $name {
+                type Item = $ty;
+                type IntoIter = <Self as rustc_type_ir::inherent::SliceLike>::IntoIter;
+
+                fn into_iter(self) -> Self::IntoIter { rustc_type_ir::inherent::SliceLike::iter(self) }
             }
 
             impl Default for $name {
@@ -95,6 +100,13 @@ macro_rules! interned_vec {
                 fn as_slice(&self) -> &[Self::Item] {
                     todo!()
                 }
+            }
+
+            impl IntoIterator for [<$name Slice>] {
+                type Item = $ty;
+                type IntoIter = <Self as rustc_type_ir::inherent::SliceLike>::IntoIter;
+
+                fn into_iter(self) -> Self::IntoIter { rustc_type_ir::inherent::SliceLike::iter(self) }
             }
 
             impl rustc_type_ir::visit::TypeVisitable<DbInterner> for [<$name Slice>] {
@@ -151,7 +163,6 @@ salsa_intern_things![
     BoundExistentialPredicates,
     Const,
     Predicate,
-    Clause,
     Variances
 ];
 
@@ -264,7 +275,7 @@ impl Interner for DbInterner {
         self.with_db(|db| db.intern_rustc_external_constraints(InternedExternalConstraints(data)))
     }
 
-    // TODO what exactly do we need to do here
+    // TODO implement cache
     type DepNodeIndex = ();
     type Tracked<T: std::fmt::Debug + Clone> = T;
 
@@ -414,7 +425,7 @@ impl Interner for DbInterner {
 
     type Features = Features;
 
-    fn features(self) -> Self::Features {
+    fn features(self) -> Features {
         todo!()
     }
 
@@ -625,6 +636,20 @@ pub fn with_interner<T>(db: &dyn HirDatabase, f: impl FnOnce(DbInterner) -> T) -
 impl DbInterner {
     pub(super) fn with_db<T>(self, f: impl FnOnce(&dyn HirDatabase) -> T) -> T {
         DB.with(move |slot| f(unsafe { &**slot }))
+    }
+
+    pub(super) fn mk_bound_variable_kinds_from_iter(
+        self,
+        iter: impl Iterator<Item = BoundVarKind>,
+    ) -> BoundVarKinds {
+        todo!()
+    }
+
+    pub fn shift_bound_var_indices<T>(self, bound_vars: usize, value: T) -> T
+    where
+        T: rustc_type_ir::fold::TypeFoldable<Self>,
+    {
+        todo!()
     }
 }
 

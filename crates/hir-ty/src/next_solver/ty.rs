@@ -3,14 +3,14 @@ use rustc_type_ir::{
     inherent::{BoundVarLike, IntoKind, ParamLike, PlaceholderLike},
     relate::Relate,
     visit::{Flags, TypeSuperVisitable, TypeVisitable},
-    TyKind,
+    BoundVar, TyKind,
 };
 
 use super::{
     with_db_out_of_thin_air, BoundVarKind, DbInterner, DefId, GenericArgs, Placeholder, Symbol,
 };
 
-interned_struct!(Ty, rustc_type_ir::TyKind<DbInterner>);
+interned_struct!(Ty, TyKind<DbInterner>);
 interned_vec!(Tys, Ty, slice);
 
 pub type PlaceholderTy = Placeholder<BoundTy>;
@@ -23,7 +23,7 @@ pub struct ParamTy {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)] // FIXME implement Debug by hand
 pub struct BoundTy {
-    pub var: rustc_type_ir::BoundVar,
+    pub var: BoundVar,
     pub kind: BoundTyKind,
 }
 
@@ -151,7 +151,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
     fn new_anon_bound(
         interner: DbInterner,
         debruijn: rustc_type_ir::DebruijnIndex,
-        var: rustc_type_ir::BoundVar,
+        var: BoundVar,
     ) -> Self {
         interner.mk_ty(TyKind::Bound(debruijn, BoundTy { var, kind: BoundTyKind::Anon }))
     }
@@ -329,7 +329,7 @@ impl ParamLike for ParamTy {
 }
 
 impl BoundVarLike<DbInterner> for BoundTy {
-    fn var(self) -> rustc_type_ir::BoundVar {
+    fn var(self) -> BoundVar {
         self.var
     }
 
@@ -343,7 +343,7 @@ impl PlaceholderLike for PlaceholderTy {
         self.universe
     }
 
-    fn var(self) -> rustc_type_ir::BoundVar {
+    fn var(self) -> BoundVar {
         self.bound.var
     }
 
@@ -351,7 +351,7 @@ impl PlaceholderLike for PlaceholderTy {
         todo!()
     }
 
-    fn new(ui: rustc_type_ir::UniverseIndex, var: rustc_type_ir::BoundVar) -> Self {
+    fn new(ui: rustc_type_ir::UniverseIndex, var: BoundVar) -> Self {
         todo!()
     }
 }
