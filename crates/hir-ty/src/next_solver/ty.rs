@@ -334,7 +334,7 @@ impl BoundVarLike<DbInterner> for BoundTy {
     }
 
     fn assert_eq(self, var: BoundVarKind) {
-        todo!()
+        assert_eq!(self.kind, var.expect_ty())
     }
 }
 
@@ -348,10 +348,10 @@ impl PlaceholderLike for PlaceholderTy {
     }
 
     fn with_updated_universe(self, ui: rustc_type_ir::UniverseIndex) -> Self {
-        todo!()
+        Placeholder { universe: ui, ..self }
     }
 
     fn new(ui: rustc_type_ir::UniverseIndex, var: BoundVar) -> Self {
-        todo!()
+        Placeholder { universe: ui, bound: BoundTy { var, kind: BoundTyKind::Anon } }
     }
 }

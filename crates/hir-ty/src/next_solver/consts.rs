@@ -3,10 +3,13 @@ use rustc_type_ir::{
     inherent::{IntoKind, PlaceholderLike},
     relate::Relate,
     visit::{Flags, TypeSuperVisitable, TypeVisitable},
-    ConstKind,
 };
 
-use super::{DbInterner, Placeholder, Symbol};
+use super::{
+    with_db_out_of_thin_air, BoundVarKind, DbInterner, ErrorGuaranteed, Placeholder, Symbol,
+};
+
+pub type ConstKind = rustc_type_ir::ConstKind<DbInterner>;
 
 interned_struct!(Const, rustc_type_ir::ConstKind<DbInterner>);
 
@@ -35,11 +38,21 @@ impl rustc_type_ir::inherent::ParamLike for ParamConst {
     }
 }
 
+impl rustc_type_ir::inherent::BoundVarLike<DbInterner> for BoundConst {
+    fn var(self) -> rustc_type_ir::BoundVar {
+        self.var
+    }
+
+    fn assert_eq(self, var: BoundVarKind) {
+        var.expect_const();
+    }
+}
+
 impl IntoKind for Const {
-    type Kind = ConstKind<DbInterner>;
+    type Kind = ConstKind;
 
     fn kind(self) -> Self::Kind {
-        todo!()
+        with_db_out_of_thin_air(|db| db.lookup_intern_rustc_const(self).0)
     }
 }
 
@@ -99,25 +112,31 @@ impl Flags for Const {
     }
 }
 
+impl DbInterner {
+    fn mk_const(self, kind: ConstKind) -> Const {
+        self.with_db(|db| db.intern_rustc_const(InternedConst(kind)))
+    }
+}
+
 impl rustc_type_ir::inherent::Const<DbInterner> for Const {
     fn try_to_target_usize(self, interner: DbInterner) -> Option<u64> {
         todo!()
     }
 
     fn new_infer(interner: DbInterner, var: rustc_type_ir::InferConst) -> Self {
-        todo!()
+        interner.mk_const(ConstKind::Infer(var))
     }
 
     fn new_var(interner: DbInterner, var: rustc_type_ir::ConstVid) -> Self {
-        todo!()
+        interner.mk_const(ConstKind::Infer(rustc_type_ir::InferConst::Var(var)))
     }
 
     fn new_bound(
         interner: DbInterner,
         debruijn: rustc_type_ir::DebruijnIndex,
-        var: <DbInterner as rustc_type_ir::Interner>::BoundConst,
+        var: BoundConst,
     ) -> Self {
-        todo!()
+        interner.mk_const(ConstKind::Bound(debruijn, var))
     }
 
     fn new_anon_bound(
@@ -125,28 +144,22 @@ impl rustc_type_ir::inherent::Const<DbInterner> for Const {
         debruijn: rustc_type_ir::DebruijnIndex,
         var: rustc_type_ir::BoundVar,
     ) -> Self {
-        todo!()
+        interner.mk_const(ConstKind::Bound(debruijn, BoundConst { var }))
     }
 
     fn new_unevaluated(
         interner: DbInterner,
         uv: rustc_type_ir::UnevaluatedConst<DbInterner>,
     ) -> Self {
-        todo!()
+        interner.mk_const(ConstKind::Unevaluated(uv))
     }
 
-    fn new_expr(
-        interner: DbInterner,
-        expr: <DbInterner as rustc_type_ir::Interner>::ExprConst,
-    ) -> Self {
-        todo!()
+    fn new_expr(interner: DbInterner, expr: ExprConst) -> Self {
+        interner.mk_const(ConstKind::Expr(expr))
     }
 
-    fn new_error(
-        interner: DbInterner,
-        guar: <DbInterner as rustc_type_ir::Interner>::ErrorGuaranteed,
-    ) -> Self {
-        todo!()
+    fn new_error(interner: DbInterner, guar: ErrorGuaranteed) -> Self {
+        interner.mk_const(ConstKind::Error(guar))
     }
 }
 
@@ -160,11 +173,11 @@ impl PlaceholderLike for PlaceholderConst {
     }
 
     fn with_updated_universe(self, ui: rustc_type_ir::UniverseIndex) -> Self {
-        todo!()
+        Placeholder { universe: ui, ..self }
     }
 
     fn new(ui: rustc_type_ir::UniverseIndex, var: rustc_type_ir::BoundVar) -> Self {
-        todo!()
+        Placeholder { universe: ui, bound: BoundConst { var } }
     }
 }
 

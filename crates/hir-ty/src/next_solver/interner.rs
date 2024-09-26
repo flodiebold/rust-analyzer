@@ -12,7 +12,7 @@ use scoped_tls::scoped_thread_local;
 use crate::{db::HirDatabase, FnAbi};
 
 use super::{
-    consts::InternedConst,
+    consts::{BoundConst, InternedConst},
     generic_arg::InternedGenericArgs,
     predicate::{InternedBoundExistentialPredicates, InternedClauses, InternedPredicate},
     ty::{InternedTy, InternedTys},
@@ -326,7 +326,7 @@ impl Interner for DbInterner {
     type Const = Const;
     type PlaceholderConst = PlaceholderConst;
     type ParamConst = ParamConst;
-    type BoundConst = BoundVar;
+    type BoundConst = BoundConst;
     type ValueConst = ValueConst;
     type ExprConst = ExprConst;
 

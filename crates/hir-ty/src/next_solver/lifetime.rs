@@ -21,7 +21,7 @@ pub struct EarlyParamRegion {
     pub name: Symbol,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement manually
+#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement Debug manually
 /// The parameter representation of late-bound function parameters, "some region
 /// at least as big as the scope `fr.scope`".
 ///
@@ -35,7 +35,7 @@ pub struct LateParamRegion {
     pub bound_region: BoundRegionKind,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement manually
+#[derive(Clone, PartialEq, Eq, Hash, Copy, Debug)] // FIXME implement Debug manually
 pub enum BoundRegionKind {
     /// An anonymous region parameter for a given fn (&T)
     BrAnon,
@@ -170,23 +170,25 @@ impl Flags for Region {
 
 impl rustc_type_ir::inherent::Region<DbInterner> for Region {
     fn new_bound(
-        interner: DbInterner,
+        _interner: DbInterner,
         debruijn: rustc_type_ir::DebruijnIndex,
-        var: <DbInterner as rustc_type_ir::Interner>::BoundRegion,
+        var: BoundRegion,
     ) -> Self {
-        todo!()
+        Region { kind: RegionKind::ReBound(debruijn, var) }
     }
 
     fn new_anon_bound(
-        interner: DbInterner,
+        _interner: DbInterner,
         debruijn: rustc_type_ir::DebruijnIndex,
         var: rustc_type_ir::BoundVar,
     ) -> Self {
-        todo!()
+        Region {
+            kind: RegionKind::ReBound(debruijn, BoundRegion { var, kind: BoundRegionKind::BrAnon }),
+        }
     }
 
-    fn new_static(interner: DbInterner) -> Self {
-        todo!()
+    fn new_static(_interner: DbInterner) -> Self {
+        Region { kind: RegionKind::ReStatic }
     }
 }
 
@@ -200,10 +202,10 @@ impl PlaceholderLike for PlaceholderRegion {
     }
 
     fn with_updated_universe(self, ui: rustc_type_ir::UniverseIndex) -> Self {
-        todo!()
+        Placeholder { universe: ui, ..self }
     }
 
     fn new(ui: rustc_type_ir::UniverseIndex, var: rustc_type_ir::BoundVar) -> Self {
-        todo!()
+        Placeholder { universe: ui, bound: BoundRegion { var, kind: BoundRegionKind::BrAnon } }
     }
 }
