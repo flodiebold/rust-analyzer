@@ -6,7 +6,31 @@ use rustc_type_ir::{
     visit::TypeVisitable,
 };
 
-use super::{DbInterner, ExternalConstraints, PredefinedOpaques};
+use super::{DbInterner, DefId};
+
+pub type OpaqueTypeKey = rustc_type_ir::OpaqueTypeKey<DbInterner>;
+
+// TODO doesn't work to intern these, because they need to implement Deref
+interned_struct!(PredefinedOpaques, PredefinedOpaquesData<DbInterner>);
+interned_struct!(ExternalConstraints, ExternalConstraintsData<DbInterner>);
+
+interned_vec!(DefiningOpaqueTypes, DefId);
+
+impl DbInterner {
+    pub(super) fn mk_predefined_opaques_in_body(
+        self,
+        data: PredefinedOpaquesData<Self>,
+    ) -> PredefinedOpaques {
+        self.with_db(|db| db.intern_rustc_predefined_opaques(InternedPredefinedOpaques(data)))
+    }
+
+    pub(super) fn mk_external_constraints(
+        self,
+        data: ExternalConstraintsData<Self>,
+    ) -> ExternalConstraints {
+        self.with_db(|db| db.intern_rustc_external_constraints(InternedExternalConstraints(data)))
+    }
+}
 
 impl Deref for PredefinedOpaques {
     type Target = PredefinedOpaquesData<DbInterner>;

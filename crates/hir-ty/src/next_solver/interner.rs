@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use base_db::salsa::{self, InternId};
-use hir_def::hir::PatId;
+use hir_def::{hir::PatId, GenericDefId};
 use rustc_type_ir::{
     relate::Relate,
     solve::{ExternalConstraintsData, PredefinedOpaquesData},
@@ -14,13 +14,16 @@ use crate::{db::HirDatabase, FnAbi};
 use super::{
     consts::{BoundConst, InternedConst},
     generic_arg::InternedGenericArgs,
+    opaques::{
+        InternedDefiningOpaqueTypes, InternedExternalConstraints, InternedPredefinedOpaques,
+    },
     predicate::{InternedBoundExistentialPredicates, InternedClauses, InternedPredicate},
     ty::{InternedTy, InternedTys},
     BoundExistentialPredicate, BoundExistentialPredicates, BoundRegion, BoundRegionKind, BoundTy,
-    BoundTyKind, Clause, Clauses, Const, EarlyParamRegion, ErrorGuaranteed, ExprConst, GenericArg,
-    GenericArgs, GenericArgsSlice, LateParamRegion, ParamConst, ParamEnv, ParamTy,
-    PlaceholderConst, PlaceholderRegion, PlaceholderTy, Predicate, Region, Safety, Symbol, Term,
-    Ty, Tys, TysSlice, ValueConst,
+    BoundTyKind, Clause, Clauses, Const, DefiningOpaqueTypes, EarlyParamRegion, ErrorGuaranteed,
+    ExprConst, ExternalConstraints, GenericArg, GenericArgs, GenericArgsSlice, LateParamRegion,
+    ParamConst, ParamEnv, ParamTy, PlaceholderConst, PlaceholderRegion, PlaceholderTy,
+    PredefinedOpaques, Predicate, Region, Safety, Symbol, Term, Ty, Tys, TysSlice, ValueConst,
 };
 
 macro_rules! interned_vec {
@@ -168,16 +171,12 @@ salsa_intern_things![
 
 interned_vec!(BoundVarKinds, BoundVarKind);
 
-interned_struct!(PredefinedOpaques, PredefinedOpaquesData<DbInterner>);
-
-interned_vec!(DefiningOpaqueTypes, DefId);
 interned_vec!(CanonicalVars, CanonicalVarInfo<DbInterner>);
-interned_struct!(ExternalConstraints, ExternalConstraintsData<DbInterner>);
 
 interned_vec!(Variances, Variance);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DefId(InternId);
+pub struct DefId(GenericDefId);
 
 impl rustc_type_ir::inherent::DefId<DbInterner> for DefId {
     fn is_local(self) -> bool {
@@ -252,7 +251,7 @@ impl Interner for DbInterner {
         self,
         data: rustc_type_ir::solve::PredefinedOpaquesData<Self>,
     ) -> Self::PredefinedOpaques {
-        self.with_db(|db| db.intern_rustc_predefined_opaques(InternedPredefinedOpaques(data)))
+        self.mk_predefined_opaques_in_body(data)
     }
 
     type DefiningOpaqueTypes = DefiningOpaqueTypes;
@@ -272,7 +271,7 @@ impl Interner for DbInterner {
         self,
         data: rustc_type_ir::solve::ExternalConstraintsData<Self>,
     ) -> Self::ExternalConstraints {
-        self.with_db(|db| db.intern_rustc_external_constraints(InternedExternalConstraints(data)))
+        self.mk_external_constraints(data)
     }
 
     // TODO implement cache
@@ -388,7 +387,7 @@ impl Interner for DbInterner {
     }
 
     fn mk_args(self, args: &[Self::GenericArg]) -> Self::GenericArgs {
-        todo!()
+        self.mk_args(args)
     }
 
     fn mk_args_from_iter<I, T>(self, args: I) -> T::Output
@@ -396,15 +395,15 @@ impl Interner for DbInterner {
         I: Iterator<Item = T>,
         T: rustc_type_ir::CollectAndApply<Self::GenericArg, Self::GenericArgs>,
     {
-        todo!()
+        self.mk_args_from_iter(args)
     }
 
     fn check_args_compatible(self, def_id: Self::DefId, args: Self::GenericArgs) -> bool {
-        todo!()
+        self.check_args_compatible(def_id, args)
     }
 
     fn debug_assert_args_compatible(self, def_id: Self::DefId, args: Self::GenericArgs) {
-        todo!()
+        self.debug_assert_args_compatible(def_id, args);
     }
 
     fn mk_type_list_from_iter<I, T>(self, args: I) -> T::Output
@@ -705,12 +704,12 @@ pub struct Generics;
 pub struct AdtDef(hir_def::AdtId);
 
 impl rustc_type_ir::inherent::AdtDef<DbInterner> for AdtDef {
-    fn def_id(self) -> <DbInterner as Interner>::DefId {
-        todo!()
+    fn def_id(self) -> DefId {
+        DefId(self.0.into())
     }
 
     fn is_struct(self) -> bool {
-        todo!()
+        matches!(self.0, hir_def::AdtId::StructId(_))
     }
 
     fn struct_tail_ty(
@@ -751,15 +750,15 @@ pub struct Features;
 
 impl rustc_type_ir::inherent::Features<DbInterner> for Features {
     fn generic_const_exprs(self) -> bool {
-        todo!()
+        false
     }
 
     fn coroutine_clone(self) -> bool {
-        todo!()
+        false
     }
 
     fn associated_const_equality(self) -> bool {
-        todo!()
+        false
     }
 }
 

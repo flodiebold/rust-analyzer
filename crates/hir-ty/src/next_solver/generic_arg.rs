@@ -3,7 +3,7 @@ use rustc_type_ir::{
     TermKind,
 };
 
-use super::{Const, DbInterner, Region, Ty};
+use super::{Const, DbInterner, DefId, Region, Ty};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GenericArg {
@@ -226,3 +226,26 @@ impl Relate<DbInterner> for Term {
 }
 
 impl rustc_type_ir::inherent::Term<DbInterner> for Term {}
+
+impl DbInterner {
+    pub(super) fn mk_args(self, args: &[GenericArg]) -> GenericArgs {
+        todo!()
+    }
+
+    pub(super) fn mk_args_from_iter<I, T>(self, args: I) -> T::Output
+    where
+        I: Iterator<Item = T>,
+        T: rustc_type_ir::CollectAndApply<GenericArg, GenericArgs>,
+    {
+        todo!()
+    }
+
+    pub(super) fn check_args_compatible(self, def_id: DefId, args: GenericArgs) -> bool {
+        // TODO
+        true
+    }
+
+    pub(super) fn debug_assert_args_compatible(self, def_id: DefId, args: GenericArgs) {
+        // TODO
+    }
+}

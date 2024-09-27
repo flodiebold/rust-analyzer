@@ -10,6 +10,7 @@ use super::{
 };
 
 pub type ConstKind = rustc_type_ir::ConstKind<DbInterner>;
+pub type UnevaluatedConst = rustc_type_ir::UnevaluatedConst<DbInterner>;
 
 interned_struct!(Const, rustc_type_ir::ConstKind<DbInterner>);
 
