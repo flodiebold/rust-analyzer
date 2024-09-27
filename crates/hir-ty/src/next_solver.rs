@@ -6,6 +6,7 @@ mod generic_arg;
 mod infer;
 mod ir_print;
 mod lifetime;
+mod mapping;
 mod opaques;
 mod predicate;
 mod solver;
