@@ -10,6 +10,8 @@ use super::{
     with_db_out_of_thin_air, BoundVarKind, DbInterner, DefId, GenericArgs, Placeholder, Symbol,
 };
 
+pub type FnHeader = rustc_type_ir::FnHeader<DbInterner>;
+
 interned_struct!(Ty, TyKind<DbInterner>);
 interned_vec!(Tys, Ty, slice);
 
@@ -104,6 +106,13 @@ impl DbInterner {
     fn mk_ty(self, kind: rustc_type_ir::TyKind<DbInterner>) -> Ty {
         self.with_db(|db| db.intern_rustc_ty(InternedTy(kind)))
     }
+
+    fn mk_tys(self, tys: &[Ty]) -> Tys {
+        self.with_db(|db| db.intern_rustc_tys(InternedTys(tys.to_vec())))
+    }
+    fn mk_tys_from_iter(self, tys: impl Iterator<Item = Ty>) -> Tys {
+        self.with_db(|db| db.intern_rustc_tys(InternedTys(tys.collect())))
+    }
 }
 
 impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
@@ -180,7 +189,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         interner: DbInterner,
         def_id: <DbInterner as rustc_type_ir::Interner>::DefId,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Foreign(def_id))
     }
 
     fn new_dynamic(
@@ -189,7 +198,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         region: <DbInterner as rustc_type_ir::Interner>::Region,
         kind: rustc_type_ir::DynKind,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Dynamic(preds, region, kind))
     }
 
     fn new_coroutine(
@@ -197,7 +206,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         def_id: <DbInterner as rustc_type_ir::Interner>::DefId,
         args: <DbInterner as rustc_type_ir::Interner>::GenericArgs,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Coroutine(def_id, args))
     }
 
     fn new_coroutine_closure(
@@ -205,7 +214,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         def_id: <DbInterner as rustc_type_ir::Interner>::DefId,
         args: <DbInterner as rustc_type_ir::Interner>::GenericArgs,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::CoroutineClosure(def_id, args))
     }
 
     fn new_closure(
@@ -213,7 +222,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         def_id: <DbInterner as rustc_type_ir::Interner>::DefId,
         args: <DbInterner as rustc_type_ir::Interner>::GenericArgs,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Closure(def_id, args))
     }
 
     fn new_coroutine_witness(
@@ -221,11 +230,11 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         def_id: <DbInterner as rustc_type_ir::Interner>::DefId,
         args: <DbInterner as rustc_type_ir::Interner>::GenericArgs,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::CoroutineWitness(def_id, args))
     }
 
     fn new_ptr(interner: DbInterner, ty: Self, mutbl: rustc_ast_ir::Mutability) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::RawPtr(ty, mutbl))
     }
 
     fn new_ref(
@@ -234,7 +243,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         ty: Self,
         mutbl: rustc_ast_ir::Mutability,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Ref(region, ty, mutbl))
     }
 
     fn new_array_with_const_len(
@@ -242,15 +251,15 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         ty: Self,
         len: <DbInterner as rustc_type_ir::Interner>::Const,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Array(ty, len))
     }
 
     fn new_slice(interner: DbInterner, ty: Self) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Slice(ty))
     }
 
     fn new_tup(interner: DbInterner, tys: &[<DbInterner as rustc_type_ir::Interner>::Ty]) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Tuple(interner.mk_tys(tys)))
     }
 
     fn new_tup_from_iter<It, T>(interner: DbInterner, iter: It) -> T::Output
@@ -258,7 +267,7 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         It: Iterator<Item = T>,
         T: rustc_type_ir::CollectAndApply<Self, Self>,
     {
-        todo!()
+        T::collect_and_apply(iter, |ts| Ty::new_tup(interner, ts))
     }
 
     fn new_fn_def(
@@ -266,14 +275,15 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         def_id: <DbInterner as rustc_type_ir::Interner>::DefId,
         args: <DbInterner as rustc_type_ir::Interner>::GenericArgs,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::FnDef(def_id, args))
     }
 
     fn new_fn_ptr(
         interner: DbInterner,
         sig: rustc_type_ir::Binder<DbInterner, rustc_type_ir::FnSig<DbInterner>>,
     ) -> Self {
-        todo!()
+        let (sig_tys, header) = sig.split();
+        interner.mk_ty(TyKind::FnPtr(sig_tys, header))
     }
 
     fn new_pat(
@@ -281,11 +291,14 @@ impl rustc_type_ir::inherent::Ty<DbInterner> for Ty {
         ty: Self,
         pat: <DbInterner as rustc_type_ir::Interner>::Pat,
     ) -> Self {
-        todo!()
+        interner.mk_ty(TyKind::Pat(ty, pat))
     }
 
     fn tuple_fields(self) -> <DbInterner as rustc_type_ir::Interner>::Tys {
-        todo!()
+        match self.kind() {
+            TyKind::Tuple(args) => args,
+            _ => panic!("tuple_fields called on non-tuple: {self:?}"),
+        }
     }
 
     fn to_opt_closure_kind(self) -> Option<rustc_type_ir::ClosureKind> {

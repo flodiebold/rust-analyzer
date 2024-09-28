@@ -64,7 +64,6 @@ macro_rules! interned_vec {
                 }
             }
 
-
             impl rustc_type_ir::relate::Relate<DbInterner> for $name {
                 fn relate<R: rustc_type_ir::relate::TypeRelation<DbInterner>>(relation: &mut R, a: Self, b: Self) -> rustc_type_ir::relate::RelateResult<DbInterner, Self> {
                     todo!()
@@ -90,6 +89,12 @@ macro_rules! interned_vec {
         paste::paste! {
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
             pub struct [<$name Slice>]($name, usize, usize);
+
+            impl [<$name Slice>] {
+                pub fn len(self) -> usize {
+                    self.2
+                }
+            }
 
             impl rustc_type_ir::inherent::SliceLike for [<$name Slice>] {
                 type Item = $ty;

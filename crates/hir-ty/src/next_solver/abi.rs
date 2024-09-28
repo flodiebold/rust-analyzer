@@ -12,7 +12,7 @@ pub enum Safety {
 
 impl Relate<DbInterner> for Safety {
     fn relate<R: rustc_type_ir::relate::TypeRelation<DbInterner>>(
-        relation: &mut R,
+        _relation: &mut R,
         a: Self,
         b: Self,
     ) -> rustc_type_ir::relate::RelateResult<DbInterner, Self> {
@@ -34,13 +34,16 @@ impl rustc_type_ir::inherent::Safety<DbInterner> for Safety {
     }
 
     fn prefix_str(self) -> &'static str {
-        todo!()
+        match self {
+            Self::Unsafe => "unsafe ",
+            Self::Safe => "",
+        }
     }
 }
 
 impl Relate<DbInterner> for FnAbi {
     fn relate<R: rustc_type_ir::relate::TypeRelation<DbInterner>>(
-        relation: &mut R,
+        _relation: &mut R,
         a: Self,
         b: Self,
     ) -> rustc_type_ir::relate::RelateResult<DbInterner, Self> {
