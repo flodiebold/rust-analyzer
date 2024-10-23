@@ -135,7 +135,7 @@ impl TypeVisitable<DbInterner> for Region {
         &self,
         visitor: &mut V,
     ) -> V::Result {
-        todo!()
+        visitor.visit_region(*self)
     }
 }
 
@@ -144,7 +144,7 @@ impl TypeFoldable<DbInterner> for Region {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        todo!()
+        folder.try_fold_region(self)
     }
 }
 
@@ -154,7 +154,7 @@ impl Relate<DbInterner> for Region {
         a: Self,
         b: Self,
     ) -> rustc_type_ir::relate::RelateResult<DbInterner, Self> {
-        todo!()
+        relation.regions(a, b)
     }
 }
 

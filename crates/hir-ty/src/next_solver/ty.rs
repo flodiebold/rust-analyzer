@@ -1,3 +1,4 @@
+use rustc_ast_ir::{try_visit, visit::VisitorResult};
 use rustc_type_ir::{
     fold::{TypeFoldable, TypeSuperFoldable},
     inherent::{BoundVarLike, IntoKind, ParamLike, PlaceholderLike},
@@ -46,12 +47,18 @@ impl IntoKind for Ty {
     }
 }
 
+impl TypeVisitable<DbInterner> for ErrorGuaranteed {
+    fn visit_with<V: rustc_type_ir::visit::TypeVisitor<DbInterner>>(&self, visitor: &mut V) -> V::Result {
+        visitor.visit_error(*self)
+    }
+}
+
 impl TypeVisitable<DbInterner> for Ty {
     fn visit_with<V: rustc_type_ir::visit::TypeVisitor<DbInterner>>(
         &self,
         visitor: &mut V,
     ) -> V::Result {
-        todo!()
+        visitor.visit_ty(*self)
     }
 }
 
@@ -60,7 +67,51 @@ impl TypeSuperVisitable<DbInterner> for Ty {
         &self,
         visitor: &mut V,
     ) -> V::Result {
-        todo!()
+        match self.kind() {
+            TyKind::RawPtr(ty, _mutbl) => ty.visit_with(visitor),
+            TyKind::Array(typ, sz) => {
+                try_visit!(typ.visit_with(visitor));
+                sz.visit_with(visitor)
+            }
+            TyKind::Slice(typ) => typ.visit_with(visitor),
+            TyKind::Adt(_, args) => args.visit_with(visitor),
+            TyKind::Dynamic(ref trait_ty, ref reg, _) => {
+                try_visit!(trait_ty.visit_with(visitor));
+                reg.visit_with(visitor)
+            }
+            TyKind::Tuple(ts) => ts.visit_with(visitor),
+            TyKind::FnDef(_, args) => args.visit_with(visitor),
+            TyKind::FnPtr(ref sig_tys, _) => sig_tys.visit_with(visitor),
+            TyKind::Ref(r, ty, _) => {
+                try_visit!(r.visit_with(visitor));
+                ty.visit_with(visitor)
+            }
+            TyKind::Coroutine(_did, ref args) => args.visit_with(visitor),
+            TyKind::CoroutineWitness(_did, ref args) => args.visit_with(visitor),
+            TyKind::Closure(_did, ref args) => args.visit_with(visitor),
+            TyKind::CoroutineClosure(_did, ref args) => args.visit_with(visitor),
+            TyKind::Alias(_, ref data) => data.visit_with(visitor),
+
+            TyKind::Pat(ty, pat) => {
+                try_visit!(ty.visit_with(visitor));
+                pat.visit_with(visitor)
+            }
+
+            TyKind::Error(guar) => guar.visit_with(visitor),
+
+            TyKind::Bool
+            | TyKind::Char
+            | TyKind::Str
+            | TyKind::Int(_)
+            | TyKind::Uint(_)
+            | TyKind::Float(_)
+            | TyKind::Infer(_)
+            | TyKind::Bound(..)
+            | TyKind::Placeholder(..)
+            | TyKind::Param(..)
+            | TyKind::Never
+            | TyKind::Foreign(..) => V::Result::output(),
+        }
     }
 }
 
@@ -69,7 +120,7 @@ impl TypeFoldable<DbInterner> for Ty {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        todo!()
+        folder.try_fold_ty(self)
     }
 }
 
@@ -78,7 +129,49 @@ impl TypeSuperFoldable<DbInterner> for Ty {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        todo!()
+        let kind = match self.kind() {
+            TyKind::RawPtr(ty, mutbl) => TyKind::RawPtr(ty.try_fold_with(folder)?, mutbl),
+            TyKind::Array(typ, sz) => TyKind::Array(typ.try_fold_with(folder)?, sz.try_fold_with(folder)?),
+            TyKind::Slice(typ) => TyKind::Slice(typ.try_fold_with(folder)?),
+            TyKind::Adt(tid, args) => TyKind::Adt(tid, args.try_fold_with(folder)?),
+            TyKind::Dynamic(trait_ty, region, representation) => TyKind::Dynamic(
+                trait_ty.try_fold_with(folder)?,
+                region.try_fold_with(folder)?,
+                representation,
+            ),
+            TyKind::Tuple(ts) => TyKind::Tuple(ts.try_fold_with(folder)?),
+            TyKind::FnDef(def_id, args) => TyKind::FnDef(def_id, args.try_fold_with(folder)?),
+            TyKind::FnPtr(sig_tys, hdr) => TyKind::FnPtr(sig_tys.try_fold_with(folder)?, hdr),
+            TyKind::Ref(r, ty, mutbl) => {
+                TyKind::Ref(r.try_fold_with(folder)?, ty.try_fold_with(folder)?, mutbl)
+            }
+            TyKind::Coroutine(did, args) => TyKind::Coroutine(did, args.try_fold_with(folder)?),
+            TyKind::CoroutineWitness(did, args) => {
+                TyKind::CoroutineWitness(did, args.try_fold_with(folder)?)
+            }
+            TyKind::Closure(did, args) => TyKind::Closure(did, args.try_fold_with(folder)?),
+            TyKind::CoroutineClosure(did, args) => {
+                TyKind::CoroutineClosure(did, args.try_fold_with(folder)?)
+            }
+            TyKind::Alias(kind, data) => TyKind::Alias(kind, data.try_fold_with(folder)?),
+            TyKind::Pat(ty, pat) => TyKind::Pat(ty.try_fold_with(folder)?, pat.try_fold_with(folder)?),
+
+            TyKind::Bool
+            | TyKind::Char
+            | TyKind::Str
+            | TyKind::Int(_)
+            | TyKind::Uint(_)
+            | TyKind::Float(_)
+            | TyKind::Error(_)
+            | TyKind::Infer(_)
+            | TyKind::Param(..)
+            | TyKind::Bound(..)
+            | TyKind::Placeholder(..)
+            | TyKind::Never
+            | TyKind::Foreign(..) => return Ok(self),
+        };
+
+        Ok(if self.kind() == kind { self } else { folder.cx().mk_ty(kind) })
     }
 }
 
@@ -88,7 +181,7 @@ impl Relate<DbInterner> for Ty {
         a: Self,
         b: Self,
     ) -> rustc_type_ir::relate::RelateResult<DbInterner, Self> {
-        todo!()
+        relation.tys(a, b)
     }
 }
 
