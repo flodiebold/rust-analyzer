@@ -3,7 +3,7 @@ use rustc_type_ir::{
     inherent::{IntoKind, PlaceholderLike},
     relate::Relate,
     visit::{Flags, TypeVisitable},
-    BoundVar, RegionKind,
+    BoundVar, RegionKind, TypeFlags, INNERMOST,
 };
 
 use super::{BoundVarKind, DbInterner, DefId, Placeholder, Symbol};
@@ -160,11 +160,14 @@ impl Relate<DbInterner> for Region {
 
 impl Flags for Region {
     fn flags(&self) -> rustc_type_ir::TypeFlags {
-        todo!()
+        self.type_flags()
     }
 
     fn outer_exclusive_binder(&self) -> rustc_type_ir::DebruijnIndex {
-        todo!()
+        match self.kind {
+            RegionKind::ReBound(debruijn, _) => debruijn.shifted_in(1),
+            _ => INNERMOST,
+        }
     }
 }
 
@@ -189,6 +192,49 @@ impl rustc_type_ir::inherent::Region<DbInterner> for Region {
 
     fn new_static(_interner: DbInterner) -> Self {
         Region { kind: RegionKind::ReStatic }
+    }
+}
+
+impl Region {
+    pub fn type_flags(&self) -> TypeFlags {
+        let mut flags = TypeFlags::empty();
+
+        match self.kind {
+            RegionKind::ReVar(..) => {
+                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_RE_INFER;
+            }
+            RegionKind::RePlaceholder(..) => {
+                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_RE_PLACEHOLDER;
+            }
+            RegionKind::ReEarlyParam(..) => {
+                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+                flags = flags | TypeFlags::HAS_RE_PARAM;
+            }
+            RegionKind::ReLateParam(..) => {
+                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_FREE_LOCAL_REGIONS;
+            }
+            RegionKind::ReStatic => {
+                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+            }
+            RegionKind::ReBound(..) => {
+                flags = flags | TypeFlags::HAS_RE_BOUND;
+            }
+            RegionKind::ReErased => {
+                flags = flags | TypeFlags::HAS_RE_ERASED;
+            }
+            RegionKind::ReError(..) => {
+                flags = flags | TypeFlags::HAS_FREE_REGIONS;
+                flags = flags | TypeFlags::HAS_ERROR;
+            }
+        }
+
+        flags
     }
 }
 
