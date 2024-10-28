@@ -1,5 +1,6 @@
 use std::ops::Deref;
 
+use intern::Interned;
 use rustc_type_ir::{
     fold::TypeFoldable,
     solve::{ExternalConstraintsData, PredefinedOpaquesData},
@@ -11,7 +12,8 @@ use super::{DbInterner, DefId};
 pub type OpaqueTypeKey = rustc_type_ir::OpaqueTypeKey<DbInterner>;
 
 // TODO doesn't work to intern these, because they need to implement Deref
-interned_struct!(PredefinedOpaques, PredefinedOpaquesData<DbInterner>);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct PredefinedOpaques(&'static PredefinedOpaquesData<DbInterner>);
 interned_struct!(ExternalConstraints, ExternalConstraintsData<DbInterner>);
 
 interned_vec!(DefiningOpaqueTypes, DefId);
@@ -21,7 +23,7 @@ impl DbInterner {
         self,
         data: PredefinedOpaquesData<Self>,
     ) -> PredefinedOpaques {
-        self.with_db(|db| db.intern_rustc_predefined_opaques(InternedPredefinedOpaques(data)))
+        PredefinedOpaques(Box::leak(Box::new(data)))
     }
 
     pub(super) fn mk_external_constraints(
@@ -36,7 +38,7 @@ impl Deref for PredefinedOpaques {
     type Target = PredefinedOpaquesData<DbInterner>;
 
     fn deref(&self) -> &Self::Target {
-        todo!()
+        &self.0
     }
 }
 

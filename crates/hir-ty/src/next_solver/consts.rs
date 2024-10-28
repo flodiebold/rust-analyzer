@@ -1,3 +1,4 @@
+use rustc_ast_ir::try_visit;
 use rustc_type_ir::{
     fold::{TypeFoldable, TypeSuperFoldable},
     inherent::{IntoKind, PlaceholderLike},
@@ -62,7 +63,7 @@ impl TypeVisitable<DbInterner> for Const {
         &self,
         visitor: &mut V,
     ) -> V::Result {
-        todo!()
+        visitor.visit_const(*self)
     }
 }
 
@@ -71,7 +72,22 @@ impl TypeSuperVisitable<DbInterner> for Const {
         &self,
         visitor: &mut V,
     ) -> V::Result {
-        todo!()
+        match self.kind() {
+            ConstKind::Param(p) => p.visit_with(visitor),
+            ConstKind::Infer(i) => i.visit_with(visitor),
+            ConstKind::Bound(d, b) => {
+                try_visit!(d.visit_with(visitor));
+                b.visit_with(visitor)
+            }
+            ConstKind::Placeholder(p) => p.visit_with(visitor),
+            ConstKind::Unevaluated(uv) => uv.visit_with(visitor),
+            ConstKind::Value(t, v) => {
+                try_visit!(t.visit_with(visitor));
+                v.visit_with(visitor)
+            }
+            ConstKind::Error(e) => e.visit_with(visitor),
+            ConstKind::Expr(e) => e.visit_with(visitor),
+        }
     }
 }
 
@@ -80,7 +96,7 @@ impl TypeFoldable<DbInterner> for Const {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        todo!()
+        folder.try_fold_const(self)
     }
 }
 
@@ -89,7 +105,25 @@ impl TypeSuperFoldable<DbInterner> for Const {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        todo!()
+        let kind = match self.kind() {
+            ConstKind::Param(p) => ConstKind::Param(p.try_fold_with(folder)?),
+            ConstKind::Infer(i) => ConstKind::Infer(i.try_fold_with(folder)?),
+            ConstKind::Bound(d, b) => {
+                ConstKind::Bound(d.try_fold_with(folder)?, b.try_fold_with(folder)?)
+            }
+            ConstKind::Placeholder(p) => ConstKind::Placeholder(p.try_fold_with(folder)?),
+            ConstKind::Unevaluated(uv) => ConstKind::Unevaluated(uv.try_fold_with(folder)?),
+            ConstKind::Value(t, v) => {
+                ConstKind::Value(t.try_fold_with(folder)?, v.try_fold_with(folder)?)
+            }
+            ConstKind::Error(e) => ConstKind::Error(e.try_fold_with(folder)?),
+            ConstKind::Expr(e) => ConstKind::Expr(e.try_fold_with(folder)?),
+        };
+        if kind != self.kind() {
+            Ok(folder.cx().mk_const(kind))
+        } else {
+            Ok(self)
+        }
     }
 }
 

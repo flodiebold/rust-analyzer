@@ -48,8 +48,20 @@ impl IntoKind for Ty {
 }
 
 impl TypeVisitable<DbInterner> for ErrorGuaranteed {
-    fn visit_with<V: rustc_type_ir::visit::TypeVisitor<DbInterner>>(&self, visitor: &mut V) -> V::Result {
+    fn visit_with<V: rustc_type_ir::visit::TypeVisitor<DbInterner>>(
+        &self,
+        visitor: &mut V,
+    ) -> V::Result {
         visitor.visit_error(*self)
+    }
+}
+
+impl TypeFoldable<DbInterner> for ErrorGuaranteed {
+    fn try_fold_with<F: rustc_type_ir::fold::FallibleTypeFolder<DbInterner>>(
+        self,
+        folder: &mut F,
+    ) -> Result<Self, F::Error> {
+        Ok(self)
     }
 }
 
@@ -131,7 +143,9 @@ impl TypeSuperFoldable<DbInterner> for Ty {
     ) -> Result<Self, F::Error> {
         let kind = match self.kind() {
             TyKind::RawPtr(ty, mutbl) => TyKind::RawPtr(ty.try_fold_with(folder)?, mutbl),
-            TyKind::Array(typ, sz) => TyKind::Array(typ.try_fold_with(folder)?, sz.try_fold_with(folder)?),
+            TyKind::Array(typ, sz) => {
+                TyKind::Array(typ.try_fold_with(folder)?, sz.try_fold_with(folder)?)
+            }
             TyKind::Slice(typ) => TyKind::Slice(typ.try_fold_with(folder)?),
             TyKind::Adt(tid, args) => TyKind::Adt(tid, args.try_fold_with(folder)?),
             TyKind::Dynamic(trait_ty, region, representation) => TyKind::Dynamic(
@@ -154,7 +168,9 @@ impl TypeSuperFoldable<DbInterner> for Ty {
                 TyKind::CoroutineClosure(did, args.try_fold_with(folder)?)
             }
             TyKind::Alias(kind, data) => TyKind::Alias(kind, data.try_fold_with(folder)?),
-            TyKind::Pat(ty, pat) => TyKind::Pat(ty.try_fold_with(folder)?, pat.try_fold_with(folder)?),
+            TyKind::Pat(ty, pat) => {
+                TyKind::Pat(ty.try_fold_with(folder)?, pat.try_fold_with(folder)?)
+            }
 
             TyKind::Bool
             | TyKind::Char

@@ -14,9 +14,7 @@ use crate::{db::HirDatabase, FnAbi};
 use super::{
     consts::{BoundConst, InternedConst},
     generic_arg::InternedGenericArgs,
-    opaques::{
-        InternedDefiningOpaqueTypes, InternedExternalConstraints, InternedPredefinedOpaques,
-    },
+    opaques::{InternedDefiningOpaqueTypes, InternedExternalConstraints},
     predicate::{InternedBoundExistentialPredicates, InternedClauses, InternedPredicate},
     ty::{InternedTy, InternedTys},
     BoundExistentialPredicate, BoundExistentialPredicates, BoundRegion, BoundRegionKind, BoundTy,
@@ -162,7 +160,6 @@ macro_rules! salsa_intern_things {
 salsa_intern_things![
     GenericArgs,
     BoundVarKinds,
-    PredefinedOpaques,
     DefiningOpaqueTypes,
     CanonicalVars,
     ExternalConstraints,
@@ -227,7 +224,21 @@ macro_rules! TrivialTypeTraversalImpls {
     };
 }
 
-TrivialTypeTraversalImpls! { DefId, PatId, Safety, FnAbi, Span, }
+TrivialTypeTraversalImpls! {
+    DefId,
+    PatId,
+    Safety,
+    FnAbi,
+    Span,
+    ParamConst,
+    ParamTy,
+    BoundRegion,
+    BoundConst,
+    Placeholder<BoundRegion>,
+    Placeholder<BoundTy>,
+    Placeholder<BoundConst>,
+    ValueConst,
+}
 
 #[derive(Clone, Copy)]
 pub struct DbInterner {
