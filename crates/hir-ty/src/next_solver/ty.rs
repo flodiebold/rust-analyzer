@@ -39,6 +39,12 @@ pub enum BoundTyKind {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ErrorGuaranteed;
 
+impl Ty {
+    pub fn error() -> Self {
+        with_db_out_of_thin_air(|db| db.intern_rustc_ty(InternedTy(TyKind::Error(ErrorGuaranteed))))
+    }
+}
+
 impl IntoKind for Ty {
     type Kind = TyKind<DbInterner>;
 

@@ -6,7 +6,7 @@ use rustc_type_ir::{
     BoundVar, RegionKind, TypeFlags, INNERMOST,
 };
 
-use super::{BoundVarKind, DbInterner, DefId, Placeholder, Symbol};
+use super::{BoundVarKind, DbInterner, DefId, ErrorGuaranteed, Placeholder, Symbol};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Region {
@@ -196,6 +196,10 @@ impl rustc_type_ir::inherent::Region<DbInterner> for Region {
 }
 
 impl Region {
+    pub fn error() -> Self {
+        Self { kind: RegionKind::ReError(ErrorGuaranteed) }
+    }
+
     pub fn type_flags(&self) -> TypeFlags {
         let mut flags = TypeFlags::empty();
 
