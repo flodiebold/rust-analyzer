@@ -50,6 +50,14 @@ impl rustc_type_ir::inherent::BoundVarLike<DbInterner> for BoundConst {
     }
 }
 
+impl Const {
+    pub fn error() -> Self {
+        with_db_out_of_thin_air(|db| {
+            db.intern_rustc_const(InternedConst(ConstKind::Error(ErrorGuaranteed)))
+        })
+    }
+}
+
 impl IntoKind for Const {
     type Kind = ConstKind;
 

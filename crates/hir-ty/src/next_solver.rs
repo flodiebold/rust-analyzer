@@ -3,6 +3,7 @@ mod interner;
 mod abi;
 mod consts;
 mod generic_arg;
+mod generics;
 mod infer;
 mod ir_print;
 mod lifetime;
@@ -20,6 +21,7 @@ type Symbol = ();
 pub use abi::Safety;
 pub use consts::{Const, ExprConst, ParamConst, PlaceholderConst, UnevaluatedConst, ValueConst};
 pub use generic_arg::{GenericArg, GenericArgs, GenericArgsSlice, Term};
+pub use generics::Generics;
 pub use infer::{Canonical, CanonicalVarInfo, CanonicalVarValues};
 pub use interner::*;
 pub use lifetime::{

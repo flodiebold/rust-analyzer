@@ -14,6 +14,7 @@ use crate::{db::HirDatabase, FnAbi};
 use super::{
     consts::{BoundConst, InternedConst},
     generic_arg::InternedGenericArgs,
+    generics::Generics,
     opaques::{InternedDefiningOpaqueTypes, InternedExternalConstraints},
     predicate::{InternedBoundExistentialPredicates, InternedClauses, InternedPredicate},
     ty::{InternedTy, InternedTys},
@@ -30,6 +31,10 @@ macro_rules! interned_vec {
             #[derive(Debug, Clone, PartialEq, Eq, Hash)]
             pub struct [<Interned $name>](Vec<$ty>);
             impl base_db::salsa::InternValueTrivial for [<Interned $name>] {}
+            impl std::ops::Deref for [<Interned $name>] {
+                type Target = Vec<$ty>;
+                fn deref(&self) -> &Self::Target { &self.0 }
+            }
 
             #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
             pub struct $name(base_db::salsa::InternId);
@@ -714,8 +719,6 @@ pub struct Placeholder<T> {
 
 pub(crate) type DebruijnIndex = u32;
 
-pub struct Generics;
-
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct AdtDef(hir_def::AdtId);
 
@@ -794,12 +797,6 @@ impl Relate<DbInterner> for PatId {
         a: Self,
         b: Self,
     ) -> rustc_type_ir::relate::RelateResult<DbInterner, Self> {
-        todo!()
-    }
-}
-
-impl rustc_type_ir::inherent::GenericsOf<DbInterner> for Generics {
-    fn count(&self) -> usize {
         todo!()
     }
 }
