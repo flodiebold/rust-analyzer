@@ -1691,7 +1691,7 @@ fn test<T: Trait<Type = u32>>(x: T, y: impl Trait<Type = i64>) {
     get2(y);
     get(set(S));
     get2(set(S));
-    get2(S::<str>);
+    get2(S::<usize>);
 }"#,
         expect![[r#"
             49..50 't': T
@@ -1703,7 +1703,7 @@ fn test<T: Trait<Type = u32>>(x: T, y: impl Trait<Type = i64>) {
             166..167 't': T
             256..257 'x': T
             262..263 'y': impl Trait<Type = i64>
-            289..397 '{     ...r>); }': ()
+            289..399 '{     ...e>); }': ()
             295..298 'get': fn get<T>(T) -> <T as Trait>::Type
             295..301 'get(x)': u32
             299..300 'x': T
@@ -1726,9 +1726,9 @@ fn test<T: Trait<Type = u32>>(x: T, y: impl Trait<Type = i64>) {
             367..370 'set': fn set<S<u64>>(S<u64>) -> S<u64>
             367..373 'set(S)': S<u64>
             371..372 'S': S<u64>
-            380..384 'get2': fn get2<str, S<str>>(S<str>) -> str
-            380..394 'get2(S::<str>)': str
-            385..393 'S::<str>': S<str>
+            380..384 'get2': fn get2<usize, S<usize>>(S<usize>) -> usize
+            380..396 'get2(S...size>)': usize
+            385..395 'S::<usize>': S<usize>
         "#]],
     );
 }
@@ -2391,7 +2391,7 @@ impl Trait for S<Self> {}
 
 fn test() {
     S.foo();
-} //^^^^^^^ {unknown}
+} //^^^^^^^ ()
 "#,
     );
 }
@@ -2740,7 +2740,7 @@ impl<F: core::ops::Deref<Target = impl Bar>> Foo<F> {
 fn dyn_trait_through_chalk() {
     check_types(
         r#"
-//- minicore: deref
+//- minicore: deref, unsize, dispatch_from_dyn
 struct Box<T: ?Sized> {}
 impl<T: ?Sized> core::ops::Deref for Box<T> {
     type Target = T;
@@ -3228,7 +3228,7 @@ fn foo() {
 fn infer_dyn_fn_output() {
     check_types(
         r#"
-//- minicore: fn
+//- minicore: fn, dispatch_from_dyn
 fn foo() {
     let f: &dyn Fn() -> i32;
     f();

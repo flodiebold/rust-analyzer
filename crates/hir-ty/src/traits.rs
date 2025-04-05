@@ -11,14 +11,28 @@ use base_db::Crate;
 use hir_def::{BlockId, TraitId, lang_item::LangItem};
 use hir_expand::name::Name;
 use intern::sym;
+use rustc_next_trait_solver::solve::{HasChanged, SolverDelegateEvalExt};
+use rustc_type_ir::{
+    InferCtxtLike, TypingMode,
+    inherent::{SliceLike, Span as _},
+    solve::Certainty,
+};
 use span::Edition;
 use stdx::{never, panic_context};
 use triomphe::Arc;
 
 use crate::{
     AliasEq, AliasTy, Canonical, DomainGoal, Goal, Guidance, InEnvironment, Interner, ProjectionTy,
-    ProjectionTyExt, Solution, TraitRefExt, Ty, TyKind, TypeFlags, WhereClause, db::HirDatabase,
-    infer::unify::InferenceTable, utils::UnevaluatedConstEvaluatorFolder,
+    ProjectionTyExt, Solution, TraitRefExt, Ty, TyKind, TypeFlags, WhereClause,
+    db::HirDatabase,
+    infer::unify::InferenceTable,
+    next_solver::{
+        DbInterner, GenericArg, SolverContext, Span,
+        infer::DbInternerInferExt,
+        mapping::{ChalkToNextSolver, convert_canonical_args_for_result},
+        util::mini_canonicalize,
+    },
+    utils::UnevaluatedConstEvaluatorFolder,
 };
 
 /// This controls how much 'time' we give the Chalk solver before giving up.
@@ -141,7 +155,26 @@ pub(crate) fn trait_solve_query(
     // We currently don't deal with universes (I think / hope they're not yet
     // relevant for our use cases?)
     let u_canonical = chalk_ir::UCanonical { canonical: goal, universes: 1 };
-    solve(db, krate, block, &u_canonical)
+    let check = false;
+    match check {
+        true => {
+            let next_solver_res = solve_nextsolver(db, krate, block, &u_canonical);
+            let chalk_res = solve(db, krate, block, &u_canonical);
+            match (&chalk_res, &next_solver_res) {
+                (Some(Solution::Unique(_)), Err(_)) => panic!(
+                    "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+                    u_canonical, chalk_res, next_solver_res
+                ),
+                (None, Ok((_, Certainty::Yes, _))) => panic!(
+                    "Next solver passed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+                    u_canonical, chalk_res, next_solver_res
+                ),
+                _ => {}
+            }
+            chalk_res
+        }
+        false => solve(db, krate, block, &u_canonical),
+    }
 }
 
 fn solve(
@@ -189,6 +222,144 @@ fn solve(
     // don't set the TLS for Chalk unless Chalk debugging is active, to make
     // extra sure we only use it for debugging
     if is_chalk_debug() { crate::tls::set_current_program(db, solve) } else { solve() }
+}
+
+fn solve_nextsolver<'db>(
+    db: &'db dyn HirDatabase,
+    krate: Crate,
+    block: Option<BlockId>,
+    goal: &chalk_ir::UCanonical<chalk_ir::InEnvironment<chalk_ir::Goal<Interner>>>,
+) -> Result<
+    (HasChanged, Certainty, rustc_type_ir::Canonical<DbInterner<'db>, Vec<GenericArg<'db>>>),
+    rustc_type_ir::solve::NoSolution,
+> {
+    crate::next_solver::tls::with_db(db, || {
+        // FIXME: should use analysis_in_body, but that needs GenericDefId::Block
+        let context = SolverContext(
+            DbInterner { db: &(), krate: Some(krate), block }
+                .infer_ctxt()
+                .build(TypingMode::non_body_analysis()),
+        );
+
+        match goal.canonical.value.goal.data(Interner) {
+            // FIXME: args here should be...what? not empty
+            GoalData::All(goals) if goals.is_empty(Interner) => {
+                return Ok((HasChanged::No, Certainty::Yes, mini_canonicalize(context, vec![])));
+            }
+            _ => {}
+        }
+
+        let goal = goal.canonical.to_nextsolver(context.cx());
+        tracing::info!(?goal);
+
+        let (goal, var_values) =
+            context.instantiate_canonical(crate::next_solver::Span::dummy(), &goal);
+        tracing::info!(?var_values);
+
+        let (res, _) = context.evaluate_root_goal(
+            goal.clone(),
+            rustc_next_trait_solver::solve::GenerateProofTree::No,
+            Span::dummy(),
+        );
+
+        let vars =
+            var_values.var_values.iter().map(|g| context.0.resolve_vars_if_possible(g)).collect();
+        let canonical_var_values = mini_canonicalize(context, vars);
+
+        let res = res.map(|r| (r.0, r.1, canonical_var_values));
+
+        tracing::debug!("solve_nextsolver({:?}) => {:?}", goal, res);
+
+        res
+    })
+}
+
+#[derive(Clone, Debug)]
+pub enum NextTraitSolveResult {
+    Certain(chalk_ir::Canonical<chalk_ir::ConstrainedSubst<Interner>>),
+    Uncertain,
+    NoSolution,
+}
+
+impl NextTraitSolveResult {
+    pub fn no_solution(&self) -> bool {
+        matches!(self, NextTraitSolveResult::NoSolution)
+    }
+
+    pub fn certain(&self) -> bool {
+        matches!(self, NextTraitSolveResult::Certain(..))
+    }
+
+    pub fn uncertain(&self) -> bool {
+        matches!(self, NextTraitSolveResult::Uncertain)
+    }
+}
+
+/// Solve a trait goal using Chalk.
+pub fn next_trait_solve(
+    db: &dyn HirDatabase,
+    krate: Crate,
+    block: Option<BlockId>,
+    goal: Canonical<InEnvironment<Goal>>,
+) -> NextTraitSolveResult {
+    let detail = match &goal.value.goal.data(Interner) {
+        GoalData::DomainGoal(DomainGoal::Holds(WhereClause::Implemented(it))) => {
+            db.trait_signature(it.hir_trait_id()).name.display(db, Edition::LATEST).to_string()
+        }
+        GoalData::DomainGoal(DomainGoal::Holds(WhereClause::AliasEq(_))) => "alias_eq".to_owned(),
+        _ => "??".to_owned(),
+    };
+    let _p = tracing::info_span!("next_trait_solve", ?detail).entered();
+    tracing::info!("next_trait_solve({:?})", goal.value.goal);
+
+    if let GoalData::DomainGoal(DomainGoal::Holds(WhereClause::AliasEq(AliasEq {
+        alias: AliasTy::Projection(projection_ty),
+        ..
+    }))) = &goal.value.goal.data(Interner)
+    {
+        if let TyKind::BoundVar(_) = projection_ty.self_type_parameter(db).kind(Interner) {
+            // Hack: don't ask Chalk to normalize with an unknown self type, it'll say that's impossible
+            // FIXME
+            return NextTraitSolveResult::Uncertain;
+        }
+    }
+
+    // Chalk see `UnevaluatedConst` as a unique concrete value, but we see it as an alias for another const. So
+    // we should get rid of it when talking to chalk.
+    let goal = goal
+        .try_fold_with(&mut UnevaluatedConstEvaluatorFolder { db }, DebruijnIndex::INNERMOST)
+        .unwrap();
+
+    // We currently don't deal with universes (I think / hope they're not yet
+    // relevant for our use cases?)
+    let u_canonical = chalk_ir::UCanonical { canonical: goal, universes: 1 };
+    tracing::info!(?u_canonical);
+
+    let next_solver_res = solve_nextsolver(db, krate, block, &u_canonical);
+    let chalk_res = solve(db, krate, block, &u_canonical);
+    match (&chalk_res, &next_solver_res) {
+        (Some(Solution::Unique(_)), Err(_)) => eprintln!(
+            "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+            u_canonical, chalk_res, next_solver_res
+        ),
+        (Some(Solution::Unique(_)), Ok((_, Certainty::Maybe(_), _))) => eprintln!(
+            "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+            u_canonical, chalk_res, next_solver_res
+        ),
+        (None, Ok((_, Certainty::Yes, _))) => eprintln!(
+            "Next solver passed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+            u_canonical, chalk_res, next_solver_res
+        ),
+        _ => {}
+    }
+
+    crate::next_solver::tls::with_db(db, || match next_solver_res {
+        Err(_) => NextTraitSolveResult::NoSolution,
+        Ok((_, Certainty::Yes, args)) => NextTraitSolveResult::Certain(
+            convert_canonical_args_for_result(DbInterner::new(), args),
+        ),
+        Ok((_, Certainty::Maybe(_), _)) => NextTraitSolveResult::Uncertain,
+    })
 }
 
 struct LoggingRustIrDatabaseLoggingOnDrop<'a>(LoggingRustIrDatabase<Interner, ChalkContext<'a>>);

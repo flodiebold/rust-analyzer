@@ -484,6 +484,8 @@ fn test() {
     );
 }
 
+// FIXME(next-solver): We could learn more from the `&S` -> `&dyn Foo<i8, _>` coercion if we followed the rustc model
+// where unsized is successful if all unsizing trait goals are certain (and non-unsizing goals are delayed).
 #[test]
 fn coerce_unsize_trait_object_simple() {
     check_types(
@@ -543,9 +545,9 @@ struct Bar<T>(Foo<T>);
 
 fn test() {
     let _: &Foo<[usize]> = &Foo { t: [1, 2, 3] };
-                         //^^^^^^^^^^^^^^^^^^^^^ expected &'? Foo<[usize]>, got &'? Foo<[i32; 3]>
+                         //^^^^^^^^^^^^^^^^^^^^^ type: &'? Foo<[usize; 3]>
     let _: &Bar<[usize]> = &Bar(Foo { t: [1, 2, 3] });
-                         //^^^^^^^^^^^^^^^^^^^^^^^^^^ expected &'? Bar<[usize]>, got &'? Bar<[i32; 3]>
+                         //^^^^^^^^^^^^^^^^^^^^^^^^^^ type: &'? Bar<[usize; 3]>
 }
 "#,
     );
@@ -899,7 +901,7 @@ impl core::ops::Index<usize> for StructMut {
 
     fn index(&self, index: usize) -> &Self::Output { &() }
 }
-impl core::ops::IndexMut for StructMut {
+impl core::ops::IndexMut<usize> for StructMut {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output { &mut () }
 }
 fn test() {

@@ -1134,6 +1134,7 @@ fn test() { (S {}).method(); }
 fn dyn_trait_super_trait_not_in_scope() {
     check_infer(
         r#"
+        //- minicore: dispatch_from_dyn
         mod m {
             pub trait SuperTrait {
                 fn foo(&self) -> u32 { 0 }
@@ -1309,7 +1310,7 @@ fn main() {
 fn dyn_trait_method_priority() {
     check_types(
         r#"
-//- minicore: from
+//- minicore: from, dispatch_from_dyn
 trait Trait {
     fn into(&self) -> usize { 0 }
 }

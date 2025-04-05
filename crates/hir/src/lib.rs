@@ -54,7 +54,7 @@ use hir_def::{
     },
     item_tree::{AttrOwner, FieldParent, ImportAlias, ItemTreeFieldId, ItemTreeNode},
     layout::{self, ReprOptions, TargetDataLayout},
-    nameres::{self, diagnostics::DefDiagnostic},
+    nameres::diagnostics::{DefDiagnostic, DefDiagnosticKind},
     per_ns::PerNs,
     resolver::{HasResolver, Resolver},
     signatures::{ImplFlags, StaticFlags, TraitFlags, VariantFields},
@@ -75,10 +75,9 @@ use hir_ty::{
     method_resolution,
     mir::{MutBorrowKind, interpret_mir},
     primitive::UintTy,
-    traits::FnTrait,
+    traits::{FnTrait, next_trait_solve},
 };
 use itertools::Itertools;
-use nameres::diagnostics::DefDiagnosticKind;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use span::{Edition, FileId};
@@ -5079,7 +5078,7 @@ impl Type {
             binders: CanonicalVarKinds::empty(Interner),
         };
 
-        db.trait_solve(self.env.krate, self.env.block, goal).is_some()
+        !next_trait_solve(db, self.env.krate, self.env.block, goal).no_solution()
     }
 
     pub fn normalize_trait_assoc_type(

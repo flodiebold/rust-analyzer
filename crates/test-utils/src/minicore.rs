@@ -31,7 +31,7 @@
 //!     eq: sized
 //!     error: fmt
 //!     fmt: option, result, transmute, coerce_unsized, copy, clone, derive
-//!     fn: tuple
+//!     fn: sized, tuple
 //!     from: sized, result
 //!     future: pin
 //!     coroutine: pin
@@ -988,6 +988,7 @@ pub mod ops {
 
         #[lang = "coroutine"]
         pub trait Coroutine<R = ()> {
+            #[lang = "coroutine_yield"]
             type Yield;
             #[lang = "coroutine_return"]
             type Return;

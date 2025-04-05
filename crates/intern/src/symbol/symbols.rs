@@ -178,6 +178,8 @@ define_symbols! {
     core,
     coroutine_state,
     coroutine,
+    coroutine_return,
+    coroutine_yield,
     count,
     crate_type,
     CStr,

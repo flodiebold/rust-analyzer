@@ -12,6 +12,7 @@ use crate::{
     db::HirDatabase,
     layout::{Layout, LayoutError},
     test_db::TestDB,
+    tests::setup_tracing,
 };
 
 mod closure;
@@ -29,6 +30,7 @@ fn eval_goal(
     #[rust_analyzer::rust_fixture] ra_fixture: &str,
     minicore: &str,
 ) -> Result<Arc<Layout>, LayoutError> {
+    let _tracing = setup_tracing();
     let target_data_layout = current_machine_data_layout();
     let ra_fixture = format!(
         "//- target_data_layout: {target_data_layout}\n{minicore}//- /main.rs crate:test\n{ra_fixture}",
@@ -97,6 +99,7 @@ fn eval_expr(
     #[rust_analyzer::rust_fixture] ra_fixture: &str,
     minicore: &str,
 ) -> Result<Arc<Layout>, LayoutError> {
+    let _tracing = setup_tracing();
     let target_data_layout = current_machine_data_layout();
     let ra_fixture = format!(
         "//- target_data_layout: {target_data_layout}\n{minicore}//- /main.rs crate:test\nfn main(){{let goal = {{{ra_fixture}}};}}",

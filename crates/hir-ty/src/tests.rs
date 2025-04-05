@@ -51,7 +51,7 @@ use crate::{
 // against snapshots of the expected results using expect. Use
 // `env UPDATE_EXPECT=1 cargo test -p hir_ty` to update the snapshots.
 
-fn setup_tracing() -> Option<tracing::subscriber::DefaultGuard> {
+pub(crate) fn setup_tracing() -> Option<tracing::subscriber::DefaultGuard> {
     static ENABLE: LazyLock<bool> = LazyLock::new(|| env::var("CHALK_DEBUG").is_ok());
     if !*ENABLE {
         return None;
@@ -421,8 +421,10 @@ fn infer_with_mismatches(content: &str, include_mismatches: bool) -> String {
     });
     for (def, krate) in defs {
         let (body, source_map) = db.body_with_source_map(def);
-        let infer = db.infer(def);
-        infer_def(infer, body, source_map, krate);
+        crate::tls::set_current_program(&db, || {
+            let infer = db.infer(def);
+            infer_def(infer, body, source_map, krate);
+        })
     }
 
     buf.truncate(buf.trim_end().len());

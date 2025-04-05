@@ -81,7 +81,7 @@ impl ImplTraitLoweringState {
     }
 }
 
-pub(crate) struct PathDiagnosticCallbackData(TypeRefId);
+pub(crate) struct PathDiagnosticCallbackData(pub(crate) TypeRefId);
 
 #[derive(Debug, Clone)]
 pub enum LifetimeElisionKind {
@@ -867,7 +867,7 @@ fn named_associated_type_shorthand_candidates<R>(
 
 pub(crate) type Diagnostics = Option<ThinArc<(), TyLoweringDiagnostic>>;
 
-fn create_diagnostics(diagnostics: Vec<TyLoweringDiagnostic>) -> Diagnostics {
+pub(crate) fn create_diagnostics(diagnostics: Vec<TyLoweringDiagnostic>) -> Diagnostics {
     (!diagnostics.is_empty()).then(|| ThinArc::from_header_and_iter((), diagnostics.into_iter()))
 }
 
@@ -1046,8 +1046,9 @@ pub(crate) fn trait_environment_query(
                     traits_in_scope
                         .push((tr.self_type_parameter(Interner).clone(), tr.hir_trait_id()));
                 }
-                let program_clause: chalk_ir::ProgramClause<Interner> = pred.cast(Interner);
-                clauses.push(program_clause.into_from_env_clause(Interner));
+                let program_clause: Binders<DomainGoal> =
+                    pred.map(|pred| pred.into_from_env_goal(Interner).cast(Interner));
+                clauses.push(program_clause);
             }
         }
     }
@@ -1060,7 +1061,10 @@ pub(crate) fn trait_environment_query(
         let substs = TyBuilder::placeholder_subst(db, trait_id);
         let trait_ref = TraitRef { trait_id: to_chalk_trait_id(trait_id), substitution: substs };
         let pred = WhereClause::Implemented(trait_ref);
-        clauses.push(pred.cast::<ProgramClause>(Interner).into_from_env_clause(Interner));
+        clauses.push(Binders::empty(
+            Interner,
+            pred.cast::<DomainGoal>(Interner).into_from_env_goal(Interner),
+        ));
     }
 
     let subst = generics.placeholder_subst(db);
@@ -1069,15 +1073,30 @@ pub(crate) fn trait_environment_query(
         if let Some(implicitly_sized_clauses) =
             implicitly_sized_clauses(db, def, &explicitly_unsized_tys, &subst, &resolver)
         {
-            clauses.extend(
-                implicitly_sized_clauses.map(|pred| {
-                    pred.cast::<ProgramClause>(Interner).into_from_env_clause(Interner)
-                }),
-            );
+            clauses.extend(implicitly_sized_clauses.map(|pred| {
+                Binders::empty(
+                    Interner,
+                    pred.into_from_env_goal(Interner).cast::<DomainGoal>(Interner),
+                )
+            }));
         };
     }
 
-    let env = chalk_ir::Environment::new(Interner).add_clauses(Interner, clauses);
+    let clauses = chalk_ir::ProgramClauses::from_iter(
+        Interner,
+        clauses.into_iter().map(|g| {
+            chalk_ir::ProgramClause::new(
+                Interner,
+                chalk_ir::ProgramClauseData(g.map(|g| chalk_ir::ProgramClauseImplication {
+                    consequence: g,
+                    conditions: chalk_ir::Goals::empty(Interner),
+                    constraints: chalk_ir::Constraints::empty(Interner),
+                    priority: chalk_ir::ClausePriority::High,
+                })),
+            )
+        }),
+    );
+    let env = chalk_ir::Environment { clauses };
 
     TraitEnvironment::new(resolver.krate(), None, traits_in_scope.into_boxed_slice(), env)
 }
@@ -1118,8 +1137,8 @@ pub(crate) fn generic_predicates_without_parent_with_diagnostics_query(
 }
 
 /// Resolve the where clause(s) of an item with generics,
-/// except the ones inherited from the parent
-fn generic_predicates_filtered_by<F>(
+/// with a given filter
+pub(crate) fn generic_predicates_filtered_by<F>(
     db: &dyn HirDatabase,
     def: GenericDefId,
     filter: F,

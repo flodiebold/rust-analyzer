@@ -781,6 +781,9 @@ fn issue_4800() {
     );
 }
 
+// FIXME(next-solver): Though `Repeat: IntoIterator` does not hold here, we
+// should be able to do better at given type hints (with Chalk, we did `IntoIterator::Item<Repeat<...>>`)
+// From what I can tell, the point of this test is to not panic though.
 #[test]
 fn issue_4966() {
     check_infer(
@@ -824,11 +827,11 @@ fn issue_4966() {
             311..317 'repeat': Repeat<Map<impl Fn(&'? f64) -> f64>>
             320..345 'Repeat...nner }': Repeat<Map<impl Fn(&'? f64) -> f64>>
             338..343 'inner': Map<impl Fn(&'? f64) -> f64>
-            356..359 'vec': Vec<IntoIterator::Item<Repeat<Map<impl Fn(&'? f64) -> f64>>>>
-            362..371 'from_iter': fn from_iter<IntoIterator::Item<Repeat<Map<impl Fn(&'? f64) -> f64>>>, Repeat<Map<impl Fn(&'? f64) -> f64>>>(Repeat<Map<impl Fn(&'? f64) -> f64>>) -> Vec<IntoIterator::Item<Repeat<Map<impl Fn(&'? f64) -> f64>>>>
-            362..379 'from_i...epeat)': Vec<IntoIterator::Item<Repeat<Map<impl Fn(&'? f64) -> f64>>>>
+            356..359 'vec': Vec<{unknown}>
+            362..371 'from_iter': fn from_iter<{unknown}, Repeat<Map<impl Fn(&'? f64) -> f64>>>(Repeat<Map<impl Fn(&'? f64) -> f64>>) -> Vec<{unknown}>
+            362..379 'from_i...epeat)': Vec<{unknown}>
             372..378 'repeat': Repeat<Map<impl Fn(&'? f64) -> f64>>
-            386..389 'vec': Vec<IntoIterator::Item<Repeat<Map<impl Fn(&'? f64) -> f64>>>>
+            386..389 'vec': Vec<{unknown}>
             386..399 'vec.foo_bar()': {unknown}
         "#]],
     );
@@ -1495,7 +1498,7 @@ fn regression_11688_2() {
 fn regression_11688_3() {
     check_types(
         r#"
-        //- minicore: iterator
+        //- minicore: iterator, dispatch_from_dyn
         struct Ar<T, const N: u8>(T);
         fn f<const LEN: usize, T, const BASE: u8>(
             num_zeros: usize,
@@ -1514,6 +1517,7 @@ fn regression_11688_3() {
 fn regression_11688_4() {
     check_types(
         r#"
+        //- minicore: dispatch_from_dyn
         trait Bar<const C: usize> {
             fn baz(&self) -> [i32; C];
         }
@@ -2063,6 +2067,9 @@ impl<'a, T> Trait<'a> for &'a T {
     )
 }
 
+// FIXME(next-solver): we don't resolve to `Foo<&'? (), Bar>` because we can't
+// prove `?0: Sized`, we can't apply partial solutions, and we do evaluation
+// for all goals
 #[test]
 fn issue_17738() {
     check_types(
@@ -2103,7 +2110,7 @@ fn test() {
     t1[&()] = Bar;
 
     let mut t2 = Foo::new(Bar);
-     // ^^^^^^ Foo<&'? (), Bar>
+     // ^^^^^^ Foo<{unknown}, Bar>
     t2[&()].bar();
 }
 "#,

@@ -368,7 +368,7 @@ language_item_table! {
     DerefMut,                sym::deref_mut,           deref_mut_trait,            Target::Trait,          GenericRequirement::Exact(0);
     DerefTarget,             sym::deref_target,        deref_target,               Target::AssocTy,        GenericRequirement::None;
     Receiver,                sym::receiver,            receiver_trait,             Target::Trait,          GenericRequirement::None;
-    ReceiverTarget,           sym::receiver_target,     receiver_target,            Target::AssocTy,        GenericRequirement::None;
+    ReceiverTarget,          sym::receiver_target,     receiver_target,            Target::AssocTy,        GenericRequirement::None;
 
     Fn,                      sym::fn_,                 fn_trait,                   Target::Trait,          GenericRequirement::Exact(1);
     FnMut,                   sym::fn_mut,              fn_mut_trait,               Target::Trait,          GenericRequirement::Exact(1);
@@ -382,6 +382,8 @@ language_item_table! {
     Future,                  sym::future_trait,        future_trait,               Target::Trait,          GenericRequirement::Exact(0);
     CoroutineState,          sym::coroutine_state,     coroutine_state,            Target::Enum,           GenericRequirement::None;
     Coroutine,               sym::coroutine,           coroutine_trait,            Target::Trait,          GenericRequirement::Minimum(1);
+    CoroutineReturn,         sym::coroutine_return,    coroutine_return_ty,        Target::AssocTy,        GenericRequirement::None;
+    CoroutineYield,          sym::coroutine_yield,     coroutine_yield_ty,         Target::AssocTy,        GenericRequirement::None;
     Unpin,                   sym::unpin,               unpin_trait,                Target::Trait,          GenericRequirement::None;
     Pin,                     sym::pin,                 pin_type,                   Target::Struct,         GenericRequirement::None;
 
