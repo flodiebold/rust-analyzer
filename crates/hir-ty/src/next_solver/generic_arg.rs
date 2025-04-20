@@ -280,7 +280,7 @@ impl<'db> rustc_type_ir::inherent::GenericArgs<DbInterner<'db>> for GenericArgs<
     fn split_closure_args(self) -> rustc_type_ir::ClosureArgsParts<DbInterner<'db>> {
         // FIXME: should use `ClosureSubst` when possible
         match self.inner().as_slice() {
-            [sig_ty, parent_args @ ..] => {
+            [parent_args @ .., sig_ty] => {
                 // This is stupid, but the next solver expects the first input to actually be a tuple
                 let sig_ty = match sig_ty.expect_ty().kind() {
                     TyKind::FnPtr(sig_tys, header) => Ty::new(
@@ -302,7 +302,7 @@ impl<'db> rustc_type_ir::inherent::GenericArgs<DbInterner<'db>> for GenericArgs<
                             header,
                         ),
                     ),
-                    _ => todo!(),
+                    _ => unreachable!("sig_ty should be last"),
                 };
                 rustc_type_ir::ClosureArgsParts {
                     parent_args: GenericArgs::new_from_iter(
