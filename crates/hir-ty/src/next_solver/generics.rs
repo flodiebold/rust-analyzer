@@ -42,7 +42,8 @@ pub(crate) fn generics(db: &dyn HirDatabase, def: SolverDefId) -> Generics {
                     let mut type_or_consts = Arena::new();
                     type_or_consts.alloc(param);
                     (
-                        def.as_generic_def_id(db),
+                        // Yes, there is a parent, but we don't include parent generics in the generics
+                        None,
                         GenericParams::new_with(
                             type_or_consts,
                             Default::default(),
