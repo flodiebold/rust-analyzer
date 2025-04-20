@@ -4785,30 +4785,30 @@ fn allowed2<'a>(baz: impl Baz<Assoc = &'a (impl Foo + 'a)>) {}
 fn allowed3(baz: impl Baz<Assoc = Qux<impl Foo>>) {}
 "#,
         expect![[r#"
-            139..140 'f': impl Fn({unknown}) + ?Sized
+            139..140 'f': impl Fn({unknown})
             161..193 '{     ...oo); }': ()
             171..174 'foo': S
             177..178 'S': S
-            184..185 'f': impl Fn({unknown}) + ?Sized
+            184..185 'f': impl Fn({unknown})
             184..190 'f(foo)': ()
             186..189 'foo': S
-            251..252 'f': impl Fn(&'? {unknown}) + ?Sized
+            251..252 'f': impl Fn(&'? {unknown})
             274..307 '{     ...oo); }': ()
             284..287 'foo': S
             290..291 'S': S
-            297..298 'f': impl Fn(&'? {unknown}) + ?Sized
+            297..298 'f': impl Fn(&'? {unknown})
             297..304 'f(&foo)': ()
             299..303 '&foo': &'? S
             300..303 'foo': S
-            325..328 'bar': impl Bar<{unknown}> + ?Sized
+            325..328 'bar': impl Bar<{unknown}>
             350..352 '{}': ()
-            405..408 'bar': impl Bar<&'? {unknown}> + ?Sized
+            405..408 'bar': impl Bar<&'? {unknown}>
             431..433 '{}': ()
-            447..450 'baz': impl Baz<Assoc = impl Foo + ?Sized> + ?Sized
+            447..450 'baz': impl Baz<Assoc = impl Foo>
             480..482 '{}': ()
-            500..503 'baz': impl Baz<Assoc = &'a impl Foo + 'a + ?Sized> + ?Sized
+            500..503 'baz': impl Baz<Assoc = &'a impl Foo + 'a>
             544..546 '{}': ()
-            560..563 'baz': impl Baz<Assoc = Qux<impl Foo + ?Sized>> + ?Sized
+            560..563 'baz': impl Baz<Assoc = Qux<impl Foo>>
             598..600 '{}': ()
         "#]],
     )
