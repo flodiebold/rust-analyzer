@@ -2,10 +2,7 @@ use intern::{Interned, Symbol, sym};
 use rustc_abi::{Float, Integer, Size};
 use rustc_ast_ir::{try_visit, visit::VisitorResult};
 use rustc_type_ir::{
-    BoundVar, ClosureKind, FlagComputation, Flags, FloatTy, FloatVid, InferTy, IntTy, IntVid,
-    TypeFoldable, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable, UintTy, WithCachedTypeInfo,
-    inherent::{BoundVarLike, GenericArgs as _, IntoKind, ParamLike, PlaceholderLike, SliceLike},
-    relate::Relate,
+    inherent::{BoundVarLike, GenericArgs as _, IntoKind, ParamLike, PlaceholderLike, SliceLike}, relate::Relate, walk::TypeWalker, BoundVar, ClosureKind, FlagComputation, Flags, FloatTy, FloatVid, InferTy, IntTy, IntVid, TypeFoldable, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable, UintTy, WithCachedTypeInfo
 };
 use salsa::plumbing::{AsId, FromId};
 use smallvec::SmallVec;
@@ -116,6 +113,10 @@ impl<'db> Ty<'db> {
             TyKind::Uint(uty) => (Integer::from_uint_ty(&interner, uty).size(), false),
             _ => panic!("non integer discriminant"),
         }
+    }
+
+    pub fn walk(self) -> TypeWalker<DbInterner<'db>> {
+        TypeWalker::new(self.into())
     }
 }
 
