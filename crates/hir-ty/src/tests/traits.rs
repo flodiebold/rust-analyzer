@@ -4254,9 +4254,9 @@ fn f<'a>(v: &dyn Trait<Assoc<i32> = &'a i32>) {
             90..94 'self': &'? Self
             127..128 'v': &'? (dyn Trait<Assoc<i32> = &'a i32> + 'static)
             164..195 '{     ...f(); }': ()
-            170..171 'v': &'? (dyn Trait<Assoc<i32> = &'a i32> + 'static)
-            170..184 'v.get::<i32>()': &'? i32
-            170..192 'v.get:...eref()': &'? i32
+            170..171 'v': &'? (dyn Trait<Assoc<i32> = &'a i32>)
+            170..184 'v.get::<i32>()': {unknown}
+            170..192 'v.get:...eref()': &'? {unknown}
         "#]],
     );
 }
