@@ -33,7 +33,7 @@ use crate::{
         AdtDef, Binder, Clause, DbInterner, ErrorGuaranteed, Predicate, ProjectionPredicate,
         Region, SolverDefId, TraitRef, Ty,
         mapping::ChalkToNextSolver,
-        util::{apply_args_to_binder, increment_params_by},
+        util::apply_args_to_binder,
     },
     primitive,
 };
@@ -267,13 +267,7 @@ impl<'a, 'b, 'db> PathLoweringContext<'a, 'b, 'db> {
                 }
             }
             TypeNs::SelfType(impl_id) => {
-                let generics = self.ctx.generics();
-                let self_ty = impl_self_ty_query(self.ctx.db, impl_id);
-                increment_params_by(
-                    self_ty.skip_binder(),
-                    generics.len_self() as u32,
-                    self.ctx.interner,
-                )
+                impl_self_ty_query(self.ctx.db, impl_id).skip_binder()
             }
             TypeNs::AdtSelfType(adt) => {
                 let args = crate::next_solver::GenericArgs::identity_for_item(
