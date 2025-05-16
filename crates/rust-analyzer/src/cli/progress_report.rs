@@ -10,7 +10,7 @@ pub(crate) struct ProgressReport<'a> {
     hidden: bool,
 
     len: usize,
-    pos: u64,
+    pub pos: u64,
     msg: Option<Box<dyn Fn() -> String + 'a>>,
 }
 

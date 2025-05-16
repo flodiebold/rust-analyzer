@@ -742,6 +742,15 @@ impl flags::AnalysisStats {
                     )
                     .join("::")
             };
+            let n = name.display(db, Edition::LATEST).to_string();
+            // if bar.pos < 18948 {
+            //     bar.inc(1);
+            //     continue;
+            // }
+            if n == "outgoing_calls" || n == "impl_method" || n == "impl_static_method" || n == "super_fold_with" || n == "generics_require_sized_item_non_self_bounds" || n == "init" || n == "remove_unused_imports" || n == "assoc_const" || n == "try_super_fold_with" || n == "sized_constraint" || n == "generics_require_sized_self" || n == "item_non_self_bounds" || n == "consider_builtin_upcast_to_principal" || n == "predicates_for_object_candidate" || n == "with_self_ty" {
+                bar.inc(1);
+                continue;
+            }
             if let Some(only_name) = self.only.as_deref() {
                 if name.display(db, Edition::LATEST).to_string() != only_name
                     && full_name() != only_name
