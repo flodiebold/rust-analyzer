@@ -1282,8 +1282,22 @@ pub(crate) fn convert_ty_for_result<'db>(interner: DbInterner<'db>, ty: Ty<'db>)
 
         rustc_type_ir::TyKind::Foreign(_) => todo!(),
         rustc_type_ir::TyKind::Pat(_, _) => todo!(),
-        rustc_type_ir::TyKind::RawPtr(_, mutability) => todo!(),
-        rustc_type_ir::TyKind::FnDef(_, _) => todo!(),
+        rustc_type_ir::TyKind::RawPtr(ty, mutability) => {
+            let mutability = match mutability {
+                rustc_ast_ir::Mutability::Mut => chalk_ir::Mutability::Mut,
+                rustc_ast_ir::Mutability::Not => chalk_ir::Mutability::Not,
+            };
+            let ty = convert_ty_for_result(interner, ty);
+            TyKind::Raw(mutability, ty)
+        }
+        rustc_type_ir::TyKind::FnDef(def_id, args) => {
+            let id = match def_id {
+                SolverDefId::FunctionId(id) => id,
+                _ => unreachable!(),
+            };
+            let subst = convert_args_for_result(interner, args.as_slice());
+            TyKind::FnDef(CallableDefId::FunctionId(id).to_chalk(interner.db()), subst)
+        }
 
         rustc_type_ir::TyKind::Closure(def_id, args) => {
             let id = match def_id {

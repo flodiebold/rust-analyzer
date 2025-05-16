@@ -650,7 +650,7 @@ impl<'db> rustc_type_ir::inherent::Ty<DbInterner<'db>> for Ty<'db> {
     }
 
     fn has_unsafe_fields(self) -> bool {
-        todo!()
+        false
     }
 }
 

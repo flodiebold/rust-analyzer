@@ -1069,7 +1069,11 @@ impl<'db> rustc_type_ir::Interner for DbInterner<'db> {
                 AdtId::StructId(id) => CallableDefId::StructId(id),
                 _ => todo!(),
             },
-            _ => unreachable!(),
+            SolverDefId::Ctor(ctor) => match ctor {
+                super::Ctor::Struct(struct_id) => CallableDefId::StructId(struct_id),
+                super::Ctor::Enum(enum_variant_id) => CallableDefId::EnumVariantId(enum_variant_id),
+            },
+            def => unreachable!("{:?}", def),
         };
         callable_item_sig(self.db(), id)
     }
