@@ -2075,12 +2075,10 @@ dependencies = [
 [[package]]
 name = "rustc_ast_ir"
 version = "0.0.0"
-source = "git+https://github.com/jackh726/rust.git?branch=master#49e5e4e3a5610c240a717cb99003a5d5d3356679"
 
 [[package]]
 name = "rustc_index"
 version = "0.0.0"
-source = "git+https://github.com/jackh726/rust.git?branch=master#49e5e4e3a5610c240a717cb99003a5d5d3356679"
 dependencies = [
  "rustc_index_macros",
  "smallvec",
@@ -2089,7 +2087,6 @@ dependencies = [
 [[package]]
 name = "rustc_index_macros"
 version = "0.0.0"
-source = "git+https://github.com/jackh726/rust.git?branch=master#49e5e4e3a5610c240a717cb99003a5d5d3356679"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2099,7 +2096,6 @@ dependencies = [
 [[package]]
 name = "rustc_next_trait_solver"
 version = "0.0.0"
-source = "git+https://github.com/jackh726/rust.git?branch=master#49e5e4e3a5610c240a717cb99003a5d5d3356679"
 dependencies = [
  "derive-where",
  "rustc_index",
@@ -2111,7 +2107,6 @@ dependencies = [
 [[package]]
 name = "rustc_type_ir"
 version = "0.0.0"
-source = "git+https://github.com/jackh726/rust.git?branch=master#49e5e4e3a5610c240a717cb99003a5d5d3356679"
 dependencies = [
  "bitflags 2.9.0",
  "derive-where",
@@ -2129,7 +2124,6 @@ dependencies = [
 [[package]]
 name = "rustc_type_ir_macros"
 version = "0.0.0"
-source = "git+https://github.com/jackh726/rust.git?branch=master#49e5e4e3a5610c240a717cb99003a5d5d3356679"
 dependencies = [
  "proc-macro2",
  "quote",
