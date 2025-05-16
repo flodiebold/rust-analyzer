@@ -375,7 +375,7 @@ pub(crate) fn for_trait_impls(
 
     let block_impls = iter::successors(block, |&block_id| {
         cov_mark::hit!(block_local_impls);
-        db.block_def_map(block_id).parent().and_then(|module| module.containing_block())
+        block_id.loc(db).module.containing_block()
     })
     .inspect(|&block_id| {
         // make sure we don't search the same block twice
@@ -622,8 +622,13 @@ pub fn explicit_item_bounds<'db>(
             let type_alias_data = db.type_alias_signature(type_alias);
             let generic_params = generics(db, type_alias.into());
             let resolver = hir_def::resolver::HasResolver::resolver(type_alias, db);
-            let mut ctx =
-                TyLoweringContext::new(db, &resolver, &type_alias_data.store, type_alias.into());
+            let mut ctx = TyLoweringContext::new(
+                db,
+                &resolver,
+                &type_alias_data.store,
+                type_alias.into(),
+                crate::LifetimeElisionKind::AnonymousReportError,
+            );
 
             let trait_args = GenericArgs::identity_for_item(interner, trait_.into());
             let item_args = GenericArgs::identity_for_item(interner, def_id);
@@ -637,13 +642,12 @@ pub fn explicit_item_bounds<'db>(
             }
 
             if !ctx.unsized_types.contains(&interner_ty) {
-                let sized_trait = ctx
-                    .db
-                    .lang_item(interner.krate.expect("Must have interner.krate"), LangItem::Sized);
+                let sized_trait = LangItem::Sized
+                    .resolve_trait(ctx.db, interner.krate.expect("Must have interner.krate"));
                 let sized_bound = sized_trait.map(|trait_id| {
                     let trait_ref = TraitRef::new_from_args(
                         interner,
-                        trait_id.as_trait().unwrap().into(),
+                        trait_id.into(),
                         GenericArgs::new_from_iter(interner, [interner_ty.clone().into()]),
                     );
                     Clause(Predicate::new(
@@ -680,12 +684,8 @@ pub fn explicit_item_bounds<'db>(
                     EarlyBinder::bind(Clauses::new_from_iter(interner, data.predicates.clone()))
                 }
                 crate::ImplTraitId::AsyncBlockTypeImplTrait(..) => {
-                    if let Some((future_trait, future_output)) = db
-                        .lang_item(
-                            interner.krate.expect("Must have interner.krate"),
-                            LangItem::Future,
-                        )
-                        .and_then(|item| item.as_trait())
+                    if let Some((future_trait, future_output)) = LangItem::Future
+                        .resolve_trait(db, interner.krate.expect("Must have interner.krate"))
                         .and_then(|trait_| {
                             let alias = db.trait_items(trait_).associated_type_by_name(
                                 &hir_expand::name::Name::new_symbol_root(sym::Output.clone()),
@@ -721,12 +721,8 @@ pub fn explicit_item_bounds<'db>(
                                 ),
                             ),
                         )));
-                        let sized_trait = db
-                            .lang_item(
-                                interner.krate.expect("Must have interner.krate"),
-                                LangItem::Sized,
-                            )
-                            .and_then(|item| item.as_trait());
+                        let sized_trait = LangItem::Sized
+                            .resolve_trait(db, interner.krate.expect("Must have interner.krate"));
                         if let Some(sized_trait_) = sized_trait {
                             let kind = PredicateKind::Clause(ClauseKind::Trait(TraitPredicate {
                                 polarity: rustc_type_ir::PredicatePolarity::Positive,

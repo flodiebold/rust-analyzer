@@ -30,7 +30,7 @@ use super::mir::{interpret_mir, lower_to_mir, pad16};
 
 pub(crate) fn path_to_const<'a, 'g>(
     db: &'a dyn HirDatabase,
-    resolver: &Resolver,
+    resolver: &Resolver<'a>,
     path: &Path,
     args: impl FnOnce() -> &'g Generics,
     expected_ty: Ty<'a>,

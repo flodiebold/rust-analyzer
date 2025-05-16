@@ -15,7 +15,6 @@ use rustc_type_ir::{
     FloatTy, IntTy, TyKind, UintTy,
     inherent::{IntoKind, SliceLike},
 };
-use salsa::Cycle;
 use triomphe::Arc;
 
 use crate::{
@@ -294,16 +293,6 @@ pub fn layout_of_ty_query<'a>(
         TyKind::UnsafeBinder(..) => todo!(),
     };
     Ok(Arc::new(result))
-}
-
-pub fn layout_of_ty_recover<'a>(
-    _: &'a dyn HirDatabase,
-    _: &Cycle,
-    _: HirDatabaseData,
-    _: &Ty<'a>,
-    _: &Arc<TraitEnvironment>,
-) -> Result<Arc<Layout>, LayoutError> {
-    Err(LayoutError::RecursiveTypeWithoutIndirection)
 }
 
 fn struct_tail_erasing_lifetimes<'a>(db: &'a dyn HirDatabase, pointee: Ty<'a>) -> Ty<'a> {

@@ -101,7 +101,7 @@ macro_rules! _interned_vec_nolifetime_salsa {
     };
     ($name:ident, $ty:ty, nofold) => {
         paste::paste! {
-            #[salsa::interned(no_lifetime, constructor = new_)]
+            #[salsa::interned(no_lifetime, constructor = new_, debug)]
             pub struct $name {
                 #[return_ref]
                 inner_: smallvec::SmallVec<[$ty; 2]>,
@@ -186,7 +186,7 @@ macro_rules! _interned_vec_db {
     };
     ($name:ty, $ty:ty, nofold) => {
         paste::paste! {
-            #[salsa::interned(constructor = new_, no_debug)]
+            #[salsa::interned(constructor = new_)]
             pub struct $name<'db> {
                 #[return_ref]
                 inner_: smallvec::SmallVec<[$ty<'db>; 2]>,
@@ -415,7 +415,7 @@ impl std::hash::Hash for AdtDefInner {
     }
 }
 
-#[salsa::interned(no_lifetime, no_debug, constructor = new_)]
+#[salsa::interned(no_lifetime, constructor = new_)]
 pub struct AdtDef {
     #[return_ref]
     data_: AdtDefInner,
@@ -1084,8 +1084,8 @@ impl<'db> rustc_type_ir::Interner for DbInterner<'db> {
 
     fn generics_require_sized_self(self, def_id: Self::DefId) -> bool {
         let sized_trait =
-            self.db().lang_item(self.krate.expect("Must have self.krate"), LangItem::Sized);
-        let Some(sized_id) = sized_trait.and_then(|t| t.as_trait()) else {
+            LangItem::Sized.resolve_trait(self.db(), self.krate.expect("Must have self.krate"));
+        let Some(sized_id) = sized_trait else {
             return false; /* No Sized trait, can't require it! */
         };
         let sized_def_id = sized_id.into();
@@ -1278,10 +1278,12 @@ impl<'db> rustc_type_ir::Interner for DbInterner<'db> {
             rustc_type_ir::lang_items::TraitSolverLangItem::Unsize => LangItem::Unsize,
             rustc_type_ir::lang_items::TraitSolverLangItem::BikeshedGuaranteedNoDrop => todo!(),
         };
-        let target = self
-            .db()
-            .lang_item(self.krate.expect("Must have self.krate"), lang_item)
-            .expect(&format!("Lang item {lang_item:?} required but not found."));
+        let target = hir_def::lang_item::lang_item(
+            self.db(),
+            self.krate.expect("Must have self.krate"),
+            lang_item,
+        )
+        .expect(&format!("Lang item {lang_item:?} required but not found."));
         match target {
             hir_def::lang_item::LangItemTarget::EnumId(enum_id) => enum_id.into(),
             hir_def::lang_item::LangItemTarget::Function(function_id) => function_id.into(),
@@ -1503,12 +1505,19 @@ impl<'db> rustc_type_ir::Interner for DbInterner<'db> {
             LangItem::AsyncFn => rustc_type_ir::lang_items::TraitSolverLangItem::AsyncFn,
             LangItem::AsyncFnMut => rustc_type_ir::lang_items::TraitSolverLangItem::AsyncFnMut,
             LangItem::AsyncFnOnce => rustc_type_ir::lang_items::TraitSolverLangItem::AsyncFnOnce,
-            LangItem::CallRefFuture => rustc_type_ir::lang_items::TraitSolverLangItem::CallRefFuture,
-            LangItem::CallOnceFuture => rustc_type_ir::lang_items::TraitSolverLangItem::CallOnceFuture,
-            LangItem::AsyncFnOnceOutput => rustc_type_ir::lang_items::TraitSolverLangItem::AsyncFnOnceOutput,
+            LangItem::CallRefFuture => {
+                rustc_type_ir::lang_items::TraitSolverLangItem::CallRefFuture
+            }
+            LangItem::CallOnceFuture => {
+                rustc_type_ir::lang_items::TraitSolverLangItem::CallOnceFuture
+            }
+            LangItem::AsyncFnOnceOutput => {
+                rustc_type_ir::lang_items::TraitSolverLangItem::AsyncFnOnceOutput
+            }
             LangItem::Ordering => return None,
             LangItem::PanicNullPointerDereference => return None,
             LangItem::ReceiverTarget => return None,
+            LangItem::UnsafePinned => todo!(),
         })
     }
 

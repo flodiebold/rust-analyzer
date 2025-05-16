@@ -64,7 +64,7 @@ mod variance;
 use std::hash::Hash;
 
 use chalk_ir::{
-    NoSolution,
+    NoSolution, VariableKinds,
     fold::{Shift, TypeFoldable},
     interner::HasInterner,
 };
@@ -158,7 +158,7 @@ pub(crate) use chalk_ir::FnSubst; // a re-export so we don't lose the tuple cons
 
 pub type AliasTy = chalk_ir::AliasTy<Interner>;
 
-pub(crate) type ProjectionTy = chalk_ir::ProjectionTy<Interner>;
+pub type ProjectionTy = chalk_ir::ProjectionTy<Interner>;
 pub(crate) type OpaqueTy = chalk_ir::OpaqueTy<Interner>;
 pub(crate) type InferenceVar = chalk_ir::InferenceVar;
 
@@ -355,7 +355,7 @@ pub(crate) fn make_binders<T: HasInterner<Interner = Interner>>(
 pub(crate) fn variable_kinds_from_iter(
     db: &dyn HirDatabase,
     iter: impl Iterator<Item = hir_def::GenericParamId>,
-) -> VariableKinds {
+) -> VariableKinds<Interner> {
     VariableKinds::from_iter(
         Interner,
         iter.map(|x| match x {

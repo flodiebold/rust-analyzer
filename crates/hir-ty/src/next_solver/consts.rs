@@ -15,7 +15,7 @@ use super::{BoundVarKind, DbInterner, ErrorGuaranteed, GenericArgs, Placeholder,
 pub type ConstKind<'db> = rustc_type_ir::ConstKind<DbInterner<'db>>;
 pub type UnevaluatedConst<'db> = rustc_type_ir::UnevaluatedConst<DbInterner<'db>>;
 
-#[salsa::interned(constructor = new_)]
+#[salsa::interned(constructor = new_, debug)]
 pub struct Const<'db> {
     #[return_ref]
     kind_: InternedWrapperNoDebug<WithCachedTypeInfo<ConstKind<'db>>>,
@@ -96,7 +96,7 @@ impl<'db> rustc_type_ir::inherent::ValueConst<DbInterner<'db>> for ValueConst<'d
     }
 }
 
-#[salsa::interned(constructor = new_)]
+#[salsa::interned(constructor = new_, debug)]
 pub struct Valtree<'db> {
     #[return_ref]
     scalar_: ConstScalar,

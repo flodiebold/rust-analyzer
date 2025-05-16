@@ -12,7 +12,7 @@ use super::{
 
 type RegionKind<'db> = rustc_type_ir::RegionKind<DbInterner<'db>>;
 
-#[salsa::interned(constructor = new_)]
+#[salsa::interned(constructor = new_, debug)]
 pub struct Region<'db> {
     #[return_ref]
     kind_: RegionKind<'db>,

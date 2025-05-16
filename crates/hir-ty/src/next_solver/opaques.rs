@@ -10,7 +10,7 @@ pub type PredefinedOpaquesData<'db> = rustc_type_ir::solve::PredefinedOpaquesDat
 pub type ExternalConstraintsData<'db> =
     rustc_type_ir::solve::ExternalConstraintsData<DbInterner<'db>>;
 
-#[salsa::interned(constructor = new_)]
+#[salsa::interned(constructor = new_, debug)]
 pub struct PredefinedOpaques<'db> {
     #[return_ref]
     kind_: rustc_type_ir::solve::PredefinedOpaquesData<DbInterner<'db>>,
@@ -81,7 +81,7 @@ impl<'db> std::ops::Deref for PredefinedOpaques<'db> {
 
 interned_vec_nolifetime_salsa!(DefiningOpaqueTypes, SolverDefId);
 
-#[salsa::interned(constructor = new_)]
+#[salsa::interned(constructor = new_, debug)]
 pub struct ExternalConstraints<'db> {
     #[return_ref]
     kind_: rustc_type_ir::solve::ExternalConstraintsData<DbInterner<'db>>,

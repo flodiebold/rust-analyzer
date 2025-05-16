@@ -2,7 +2,11 @@ use intern::{Interned, Symbol, sym};
 use rustc_abi::{Float, Integer, Size};
 use rustc_ast_ir::{try_visit, visit::VisitorResult};
 use rustc_type_ir::{
-    inherent::{BoundVarLike, GenericArgs as _, IntoKind, ParamLike, PlaceholderLike, SliceLike}, relate::Relate, walk::TypeWalker, BoundVar, ClosureKind, FlagComputation, Flags, FloatTy, FloatVid, InferTy, IntTy, IntVid, TypeFoldable, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable, UintTy, WithCachedTypeInfo
+    BoundVar, ClosureKind, FlagComputation, Flags, FloatTy, FloatVid, InferTy, IntTy, IntVid,
+    TypeFoldable, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable, UintTy, WithCachedTypeInfo,
+    inherent::{BoundVarLike, GenericArgs as _, IntoKind, ParamLike, PlaceholderLike, SliceLike},
+    relate::Relate,
+    walk::TypeWalker,
 };
 use salsa::plumbing::{AsId, FromId};
 use smallvec::SmallVec;
@@ -21,7 +25,7 @@ use super::{
 pub type TyKind<'db> = rustc_type_ir::TyKind<DbInterner<'db>>;
 pub type FnHeader<'db> = rustc_type_ir::FnHeader<DbInterner<'db>>;
 
-#[salsa::interned(constructor = new_, no_debug)]
+#[salsa::interned(constructor = new_)]
 pub struct Ty<'db> {
     #[return_ref]
     kind_: InternedWrapperNoDebug<WithCachedTypeInfo<TyKind<'db>>>,

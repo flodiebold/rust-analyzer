@@ -5,17 +5,15 @@ use std::cmp;
 use hir_def::{
     AdtId, VariantId,
     layout::{Integer, ReprOptions, TargetDataLayout},
-    signatures::VariantFields,
+    signatures::{StructFlags, VariantFields},
 };
 use rustc_index::IndexVec;
-use salsa::Cycle;
 use smallvec::SmallVec;
 use triomphe::Arc;
 
 use crate::{
-    Substitution, TraitEnvironment,
+    TraitEnvironment,
     db::HirDatabase,
-    lang_items::is_unsafe_cell,
     layout::{Layout, LayoutError, adt::layout_scalar_valid_range},
     next_solver::GenericArgs,
 };
@@ -40,18 +38,22 @@ pub fn layout_of_adt_query<'db>(
             .map(|(fd, _)| layout_of_ty_query(db, field_ty(db, def, fd, args), trait_env.clone()))
             .collect::<Result<Vec<_>, _>>()
     };
-    let (variants, repr) = match def {
+    let (variants, repr, is_special_no_niche) = match def {
         AdtId::StructId(s) => {
             let data = db.struct_signature(s);
             let mut r = SmallVec::<[_; 1]>::new();
             r.push(handle_variant(s.into(), &db.variant_fields(s.into()))?);
-            (r, data.repr.unwrap_or_default())
+            (
+                r,
+                data.repr.unwrap_or_default(),
+                data.flags.intersects(StructFlags::IS_UNSAFE_CELL | StructFlags::IS_UNSAFE_PINNED),
+            )
         }
         AdtId::UnionId(id) => {
             let data = db.union_signature(id);
             let mut r = SmallVec::new();
             r.push(handle_variant(id.into(), &db.variant_fields(id.into()))?);
-            (r, data.repr.unwrap_or_default())
+            (r, data.repr.unwrap_or_default(), false)
         }
         AdtId::EnumId(e) => {
             let variants = db.enum_variants(e);
@@ -60,7 +62,7 @@ pub fn layout_of_adt_query<'db>(
                 .iter()
                 .map(|&(v, _)| handle_variant(v.into(), &db.variant_fields(v.into())))
                 .collect::<Result<SmallVec<_>, _>>()?;
-            (r, db.enum_signature(e).repr.unwrap_or_default())
+            (r, db.enum_signature(e).repr.unwrap_or_default(), false)
         }
     };
     let variants = variants
@@ -75,7 +77,7 @@ pub fn layout_of_adt_query<'db>(
             &repr,
             &variants,
             matches!(def, AdtId::EnumId(..)),
-            is_unsafe_cell(db, def),
+            is_special_no_niche,
             layout_scalar_valid_range(db, def),
             |min, max| repr_discr(dl, &repr, min, max).unwrap_or((Integer::I8, false)),
             variants.iter_enumerated().filter_map(|(id, _)| {
@@ -102,16 +104,6 @@ pub fn layout_of_adt_query<'db>(
         )?
     };
     Ok(Arc::new(result))
-}
-
-pub fn layout_of_adt_recover(
-    _: &dyn HirDatabase,
-    _: &Cycle,
-    _: &AdtId,
-    _: &Substitution,
-    _: &Arc<TraitEnvironment>,
-) -> Result<Arc<Layout>, LayoutError> {
-    Err(LayoutError::RecursiveTypeWithoutIndirection)
 }
 
 /// Finds the appropriate Integer type and signedness for the given

@@ -106,7 +106,23 @@ pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<Infer
                             true => BuiltinType::Int(BuiltinInt::Isize),
                             false => BuiltinType::Uint(BuiltinUint::Usize),
                         },
-                    }
+                        hir_def::layout::IntegerType::Fixed(size, signed) => match signed {
+                            true => BuiltinType::Int(match size {
+                                Integer::I8 => BuiltinInt::I8,
+                                Integer::I16 => BuiltinInt::I16,
+                                Integer::I32 => BuiltinInt::I32,
+                                Integer::I64 => BuiltinInt::I64,
+                                Integer::I128 => BuiltinInt::I128,
+                            }),
+                            false => BuiltinType::Uint(match size {
+                                Integer::I8 => BuiltinUint::U8,
+                                Integer::I16 => BuiltinUint::U16,
+                                Integer::I32 => BuiltinUint::U32,
+                                Integer::I64 => BuiltinUint::U64,
+                                Integer::I128 => BuiltinUint::U128,
+                            }),
+                        },
+                    },
                 );
             }
         }
