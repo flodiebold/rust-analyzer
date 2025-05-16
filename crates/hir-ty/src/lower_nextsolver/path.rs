@@ -33,7 +33,8 @@ use crate::{
     lower_nextsolver::impl_self_ty_query,
     next_solver::{
         AdtDef, Binder, Clause, Const, DbInterner, ErrorGuaranteed, Predicate, ProjectionPredicate,
-        Region, SolverDefId, TraitRef, Ty, mapping::ChalkToNextSolver,
+        Region, SolverDefId, TraitRef, Ty,
+        mapping::{ChalkToNextSolver, convert_binder_to_early_binder},
     },
     primitive,
 };
@@ -746,8 +747,9 @@ impl<'a, 'b, 'db> PathLoweringContext<'a, 'b, 'db> {
             ) -> crate::next_solver::GenericArg<'db> {
                 let default = || {
                     self.ctx.ctx.db.generic_defaults(def).get(preceding_args.len()).map(|default| {
-                        rustc_type_ir::EarlyBinder::bind(
-                            default.to_nextsolver(self.ctx.ctx.interner).skip_binder(),
+                        convert_binder_to_early_binder(
+                            self.ctx.ctx.interner,
+                            default.to_nextsolver(self.ctx.ctx.interner),
                         )
                         .instantiate(self.ctx.ctx.interner, preceding_args)
                     })
@@ -1091,6 +1093,8 @@ pub(crate) fn substs_from_args_and_bindings<'db>(
     ctx: &mut impl GenericArgsLowerer<'db>,
 ) -> crate::next_solver::GenericArgs<'db> {
     let interner = DbInterner::new_with(db, None, None);
+
+    tracing::debug!(?args_and_bindings);
 
     // Order is
     // - Parent parameters

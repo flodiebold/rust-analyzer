@@ -1596,6 +1596,7 @@ impl<'db> rustc_type_ir::Interner for DbInterner<'db> {
         false
     }
 
+    #[tracing::instrument(skip(self), ret)]
     fn impl_trait_ref(
         self,
         impl_def_id: Self::DefId,
