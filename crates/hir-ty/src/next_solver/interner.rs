@@ -894,8 +894,7 @@ impl<'db> rustc_type_ir::Interner for DbInterner<'db> {
         self,
         f: impl FnOnce(&mut rustc_type_ir::search_graph::GlobalCache<Self>) -> R,
     ) -> R {
-        let mut cache = rustc_type_ir::search_graph::GlobalCache::default();
-        f(&mut cache)
+        tls_cache::with_cache(f)
     }
 
     fn evaluation_is_concurrent(&self) -> bool {
@@ -2008,5 +2007,25 @@ pub mod tls {
         f: impl FnOnce(Option<&dyn crate::db::HirDatabase>) -> T,
     ) -> T {
         if DB.is_set() { DB.with(move |slot| f(Some(unsafe { &**slot }))) } else { f(None) }
+    }
+}
+
+pub(crate) use tls_cache::with_new_cache;
+mod tls_cache {
+    use std::cell::RefCell;
+
+    use rustc_type_ir::search_graph::GlobalCache;
+
+    use super::DbInterner;
+
+    scoped_tls::scoped_thread_local!(static GLOBAL_CACHE: RefCell<rustc_type_ir::search_graph::GlobalCache<DbInterner<'static>>>);
+
+    pub(crate) fn with_new_cache<T>(f: impl FnOnce() -> T) -> T {
+        GLOBAL_CACHE.set(&RefCell::new(GlobalCache::default()), f)
+    }
+
+    pub(super) fn with_cache<'db, T>(f: impl FnOnce(&mut GlobalCache<DbInterner<'db>>) -> T) -> T {
+        // SAFETY: No idea
+        GLOBAL_CACHE.with(move |slot| f(unsafe { std::mem::transmute(&mut *slot.borrow_mut()) }))
     }
 }

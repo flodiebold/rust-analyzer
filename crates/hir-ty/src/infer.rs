@@ -87,6 +87,7 @@ pub(crate) use closure::{CaptureKind, CapturedItem, CapturedItemWithoutTy};
 
 /// The entry point of type inference.
 pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<InferenceResult> {
+    crate::next_solver::with_new_cache(|| {
     crate::next_solver::tls::with_db(db, || {
         let _p = tracing::info_span!("infer_query").entered();
         let resolver = def.resolver(db);
@@ -134,6 +135,7 @@ pub(crate) fn infer_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Arc<Infer
         ctx.infer_closures();
 
         Arc::new(ctx.resolve_all())
+    })
     })
 }
 
