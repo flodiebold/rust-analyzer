@@ -336,22 +336,22 @@ pub fn next_trait_solve(
     tracing::info!(?u_canonical);
 
     let next_solver_res = solve_nextsolver(db, krate, block, &u_canonical);
-    let chalk_res = solve(db, krate, block, &u_canonical);
-    match (&chalk_res, &next_solver_res) {
-        (Some(Solution::Unique(_)), Err(_)) => eprintln!(
-            "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
-            u_canonical, chalk_res, next_solver_res
-        ),
-        (Some(Solution::Unique(_)), Ok((_, Certainty::Maybe(_), _))) => eprintln!(
-            "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
-            u_canonical, chalk_res, next_solver_res
-        ),
-        (None, Ok((_, Certainty::Yes, _))) => eprintln!(
-            "Next solver passed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
-            u_canonical, chalk_res, next_solver_res
-        ),
-        _ => {}
-    }
+    // let chalk_res = solve(db, krate, block, &u_canonical);
+    // match (&chalk_res, &next_solver_res) {
+    //     (Some(Solution::Unique(_)), Err(_)) => eprintln!(
+    //         "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+    //         u_canonical, chalk_res, next_solver_res
+    //     ),
+    //     (Some(Solution::Unique(_)), Ok((_, Certainty::Maybe(_), _))) => eprintln!(
+    //         "Next solver failed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+    //         u_canonical, chalk_res, next_solver_res
+    //     ),
+    //     (None, Ok((_, Certainty::Yes, _))) => eprintln!(
+    //         "Next solver passed when Chalk did not.\n{:?}\n{:?}\n{:?}\n",
+    //         u_canonical, chalk_res, next_solver_res
+    //     ),
+    //     _ => {}
+    // }
 
     crate::next_solver::tls::with_db(db, || match next_solver_res {
         Err(_) => NextTraitSolveResult::NoSolution,
