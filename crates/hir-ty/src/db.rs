@@ -108,6 +108,10 @@ pub trait HirDatabase: DefDatabase + std::fmt::Debug {
         trait_env: Arc<TraitEnvironment<'db>>,
     ) -> Result<Arc<Layout>, LayoutError>;
 
+    // FIXME: it seems a bit weird that this takes a trait env. The crate we're
+    // in could have an effect on the layout, since we could have completely
+    // separate crate graphs including separate stds, but otherwise the same
+    // type *needs* to always have the same layout??
     #[salsa::invoke(crate::layout::layout_of_ty_query)]
     #[salsa::cycle(cycle_result = crate::layout::layout_of_ty_cycle_result)]
     fn layout_of_ty<'db>(

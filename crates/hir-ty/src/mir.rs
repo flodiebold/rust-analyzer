@@ -138,6 +138,10 @@ impl<'db> Operand<'db> {
         let ty = Ty::new_fn_def(interner, CallableDefId::FunctionId(func_id).into(), generic_args);
         Operand::from_bytes(Box::default(), ty)
     }
+
+    pub fn kind(&self) -> &OperandKind<'db> {
+        &self.kind
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

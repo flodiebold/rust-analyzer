@@ -2017,10 +2017,22 @@ fn fn_sig_for_fn<'db>(
         None => Ty::new_tup(interner, &[]),
     };
 
+    let abi = data
+        .abi
+        .as_ref()
+        .map(FnAbi::from_symbol)
+        .or_else(|| match def.lookup(db).container {
+            hir_def::ItemContainerId::ExternBlockId(block) => {
+                block.abi(db).as_ref().map(FnAbi::from_symbol)
+            }
+            _ => None,
+        })
+        .unwrap_or(FnAbi::Rust);
+
     let inputs_and_output = Tys::new_from_iter(interner, params.chain(Some(ret)));
     // If/when we track late bound vars, we need to switch this to not be `dummy`
     EarlyBinder::bind(rustc_type_ir::Binder::dummy(FnSig {
-        abi: data.abi.as_ref().map_or(FnAbi::Rust, FnAbi::from_symbol),
+        abi,
         c_variadic: data.is_varargs(),
         safety: if data.is_unsafe() { Safety::Unsafe } else { Safety::Safe },
         inputs_and_output,
