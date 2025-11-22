@@ -1,10 +1,14 @@
 use std::mem;
 
 use rustc_index::IndexVec;
-use rustc_middle::mir::*;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
-use rustc_middle::{bug, span_bug};
-use smallvec::{SmallVec, smallvec};
+use crate::mir::dataflow::rustc_mir::*;
+// use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
+use crate::next_solver::Ty;
+use crate::next_solver as ty;
+// use rustc_middle::{bug, span_bug};
+use rustc_type_ir::TyKind;
+fn span_bug() -> ! {panic!()}
+use smallvec::{smallvec, SmallVec};
 use tracing::debug;
 
 use super::{
@@ -14,21 +18,25 @@ use super::{
 
 struct MoveDataBuilder<'a, 'tcx, F> {
     body: &'a Body<'tcx>,
-    loc: Location,
-    tcx: TyCtxt<'tcx>,
+    loc: Location<'tcx>,
+    tcx: DbInterner<'tcx>,
     data: MoveData<'tcx>,
     filter: F,
 }
 
 impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
-    fn new(body: &'a Body<'tcx>, tcx: TyCtxt<'tcx>, filter: F) -> Self {
+    fn new(
+        body: &'a Body<'tcx>,
+        tcx: DbInterner<'tcx>,
+        filter: F,
+    ) -> Self {
         let mut move_paths = IndexVec::new();
         let mut path_map = IndexVec::new();
         let mut init_path_map = IndexVec::new();
 
         let locals = body
-            .local_decls
-            .iter_enumerated()
+            .locals
+            .iter()
             .map(|(i, l)| {
                 if l.is_deref_temp() {
                     return None;
@@ -49,7 +57,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
 
         MoveDataBuilder {
             body,
-            loc: Location::START,
+            loc: Location::start(body),
             tcx,
             data: MoveData {
                 moves: IndexVec::new(),
@@ -137,45 +145,45 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                 MoveSubPathResult::One(move_elem) => {
                     match move_elem {
                         MoveSubPath::Deref => match place_ty.kind() {
-                            ty::Ref(..) | ty::RawPtr(..) => {
+                            TyKind::Ref(..) | TyKind::RawPtr(..) => {
                                 return;
                             }
-                            ty::Adt(adt, _) => {
+                            TyKind::Adt(adt, _) => {
                                 if !adt.is_box() {
                                     bug!("Adt should be a box type when Place is deref");
                                 }
                             }
-                            ty::Bool
-                            | ty::Char
-                            | ty::Int(_)
-                            | ty::Uint(_)
-                            | ty::Float(_)
-                            | ty::Foreign(_)
-                            | ty::Str
-                            | ty::Array(_, _)
-                            | ty::Pat(_, _)
-                            | ty::Slice(_)
-                            | ty::FnDef(_, _)
-                            | ty::FnPtr(..)
-                            | ty::Dynamic(_, _)
-                            | ty::Closure(..)
-                            | ty::CoroutineClosure(..)
-                            | ty::Coroutine(_, _)
-                            | ty::CoroutineWitness(..)
-                            | ty::Never
-                            | ty::Tuple(_)
-                            | ty::UnsafeBinder(_)
-                            | ty::Alias(_, _)
-                            | ty::Param(_)
-                            | ty::Bound(_, _)
-                            | ty::Infer(_)
-                            | ty::Error(_)
-                            | ty::Placeholder(_) => {
+                            TyKind::Bool
+                            | TyKind::Char
+                            | TyKind::Int(_)
+                            | TyKind::Uint(_)
+                            | TyKind::Float(_)
+                            | TyKind::Foreign(_)
+                            | TyKind::Str
+                            | TyKind::Array(_, _)
+                            | TyKind::Pat(_, _)
+                            | TyKind::Slice(_)
+                            | TyKind::FnDef(_, _)
+                            | TyKind::FnPtr(..)
+                            | TyKind::Dynamic(_, _)
+                            | TyKind::Closure(..)
+                            | TyKind::CoroutineClosure(..)
+                            | TyKind::Coroutine(_, _)
+                            | TyKind::CoroutineWitness(..)
+                            | TyKind::Never
+                            | TyKind::Tuple(_)
+                            | TyKind::UnsafeBinder(_)
+                            | TyKind::Alias(_, _)
+                            | TyKind::Param(_)
+                            | TyKind::Bound(_, _)
+                            | TyKind::Infer(_)
+                            | TyKind::Error(_)
+                            | TyKind::Placeholder(_) => {
                                 bug!("When Place is Deref it's type shouldn't be {place_ty:#?}")
                             }
                         },
                         MoveSubPath::Field(_) => match place_ty.kind() {
-                            ty::Adt(adt, _) => {
+                            TyKind::Adt(adt, _) => {
                                 if adt.has_dtor(tcx) {
                                     return;
                                 }
@@ -183,42 +191,42 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                                     union_path.get_or_insert(base);
                                 }
                             }
-                            ty::Closure(..)
-                            | ty::CoroutineClosure(..)
-                            | ty::Coroutine(_, _)
-                            | ty::Tuple(_) => (),
-                            ty::Bool
-                            | ty::Char
-                            | ty::Int(_)
-                            | ty::Uint(_)
-                            | ty::Float(_)
-                            | ty::Foreign(_)
-                            | ty::Str
-                            | ty::Array(_, _)
-                            | ty::Pat(_, _)
-                            | ty::Slice(_)
-                            | ty::RawPtr(_, _)
-                            | ty::Ref(_, _, _)
-                            | ty::FnDef(_, _)
-                            | ty::FnPtr(..)
-                            | ty::Dynamic(_, _)
-                            | ty::CoroutineWitness(..)
-                            | ty::Never
-                            | ty::UnsafeBinder(_)
-                            | ty::Alias(_, _)
-                            | ty::Param(_)
-                            | ty::Bound(_, _)
-                            | ty::Infer(_)
-                            | ty::Error(_)
-                            | ty::Placeholder(_) => bug!(
+                            TyKind::Closure(..)
+                            | TyKind::CoroutineClosure(..)
+                            | TyKind::Coroutine(_, _)
+                            | TyKind::Tuple(_) => (),
+                            TyKind::Bool
+                            | TyKind::Char
+                            | TyKind::Int(_)
+                            | TyKind::Uint(_)
+                            | TyKind::Float(_)
+                            | TyKind::Foreign(_)
+                            | TyKind::Str
+                            | TyKind::Array(_, _)
+                            | TyKind::Pat(_, _)
+                            | TyKind::Slice(_)
+                            | TyKind::RawPtr(_, _)
+                            | TyKind::Ref(_, _, _)
+                            | TyKind::FnDef(_, _)
+                            | TyKind::FnPtr(..)
+                            | TyKind::Dynamic(_, _)
+                            | TyKind::CoroutineWitness(..)
+                            | TyKind::Never
+                            | TyKind::UnsafeBinder(_)
+                            | TyKind::Alias(_, _)
+                            | TyKind::Param(_)
+                            | TyKind::Bound(_, _)
+                            | TyKind::Infer(_)
+                            | TyKind::Error(_)
+                            | TyKind::Placeholder(_) => bug!(
                                 "When Place contains ProjectionElem::Field its type shouldn't be {place_ty:#?}"
                             ),
                         },
                         MoveSubPath::ConstantIndex(_) => match place_ty.kind() {
-                            ty::Slice(_) => {
+                            TyKind::Slice(_) => {
                                 return;
                             }
-                            ty::Array(_, _) => (),
+                            TyKind::Array(_, _) => (),
                             _ => bug!("Unexpected type {:#?}", place_ty.is_array()),
                         },
                         MoveSubPath::Downcast(_) => (),
@@ -302,7 +310,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
         &mut self,
         base: MovePathIndex,
         elem: MoveSubPath,
-        mk_place: impl FnOnce(TyCtxt<'tcx>) -> Place<'tcx>,
+        mk_place: impl FnOnce(DbInterner<'tcx>) -> Place<'tcx>,
     ) -> MovePathIndex {
         let MoveDataBuilder {
             data: MoveData { rev_lookup, move_paths, path_map, init_path_map, .. },
@@ -339,7 +347,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
 
 pub(super) fn gather_moves<'tcx>(
     body: &Body<'tcx>,
-    tcx: TyCtxt<'tcx>,
+    tcx: DbInterner<'tcx>,
     filter: impl Fn(Ty<'tcx>) -> bool,
 ) -> MoveData<'tcx> {
     let mut builder = MoveDataBuilder::new(body, tcx, filter);
@@ -379,7 +387,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
     fn gather_statement(&mut self, stmt: &Statement<'tcx>) {
         debug!("gather_statement({:?}, {:?})", self.loc, stmt);
         match &stmt.kind {
-            StatementKind::Assign(box (place, Rvalue::CopyForDeref(reffed))) => {
+            StatementKind::Assign(place, Rvalue::CopyForDeref(reffed)) => {
                 let local = place.as_local().unwrap();
                 assert!(self.body.local_decls[local].is_deref_temp());
 
@@ -389,7 +397,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                 let base_local = rev_lookup.un_derefer.deref_chain(local).first().unwrap().local;
                 rev_lookup.locals[local] = rev_lookup.locals[base_local];
             }
-            StatementKind::Assign(box (place, rval)) => {
+            StatementKind::Assign(place, rval) => {
                 self.create_move_path(*place);
                 if let RvalueInitializationState::Shallow = rval.initialization_state() {
                     // Box starts out uninitialized - need to create a separate
@@ -402,7 +410,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                 }
                 self.gather_rvalue(rval);
             }
-            StatementKind::FakeRead(box (_, place)) => {
+            StatementKind::FakeRead(/*_, */place) => {
                 self.create_move_path(*place);
             }
             StatementKind::StorageLive(_) => {}
@@ -423,8 +431,8 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
             | StatementKind::PlaceMention(..)
             | StatementKind::Coverage(..)
             | StatementKind::Intrinsic(..)
-            | StatementKind::ConstEvalCounter
-            | StatementKind::BackwardIncompatibleDropHint { .. }
+            // | StatementKind::ConstEvalCounter
+            // | StatementKind::BackwardIncompatibleDropHint { .. }
             | StatementKind::Nop => {}
         }
     }
@@ -436,11 +444,11 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
             | Rvalue::Repeat(ref operand, _)
             | Rvalue::Cast(_, ref operand, _)
             | Rvalue::ShallowInitBox(ref operand, _)
-            | Rvalue::UnaryOp(_, ref operand)
-            | Rvalue::WrapUnsafeBinder(ref operand, _) => self.gather_operand(operand),
-            Rvalue::BinaryOp(ref _binop, box (ref lhs, ref rhs)) => {
-                self.gather_operand(lhs);
-                self.gather_operand(rhs);
+            | Rvalue::UnaryOp(_, ref operand) => self.gather_operand(operand),
+            // | Rvalue::WrapUnsafeBinder(ref operand, _) => self.gather_operand(operand),
+            Rvalue::BinaryOp(ref _binop/*, box (ref lhs, ref rhs)*/) => {
+                // self.gather_operand(lhs);
+                // self.gather_operand(rhs);
             }
             Rvalue::Aggregate(ref _kind, ref operands) => {
                 for operand in operands {
@@ -451,7 +459,11 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
             Rvalue::Ref(..)
             | Rvalue::RawPtr(..)
             | Rvalue::Discriminant(..)
-            | Rvalue::NullaryOp(NullOp::RuntimeChecks(_)) => {}
+            | Rvalue::Len(..)
+            | Rvalue::NullaryOp(
+                // NullOp::SizeOf | NullOp::AlignOf | NullOp::OffsetOf(..) | NullOp::UbChecks,
+                _,
+            ) => {}
         }
     }
 
@@ -579,7 +591,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
 
         // Check if we are assigning into a field of a union, if so, lookup the place
         // of the union so it is marked as initialized again.
-        if let Some((place_base, ProjectionElem::Field(_, _))) = place.last_projection() {
+        if let Some((place_base, ProjectionElem::Field(_/*, _*/))) = place.last_projection() {
             if place_base.ty(self.body, self.tcx).ty.is_union() {
                 place = place_base;
             }

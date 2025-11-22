@@ -11,8 +11,9 @@
 //! `a[x]` would still overlap them both. But that is not this
 //! representation does today.)
 
-use rustc_middle::mir::{Local, Operand, PlaceElem, ProjectionElem};
-use rustc_middle::ty::Ty;
+use crate::mir::dataflow::rustc_mir::{Operand, PlaceElem, ProjectionElem};
+use crate::next_solver::Ty;
+type Local<'tcx> = crate::mir::LocalId<'tcx>;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct AbstractOperand;
@@ -30,7 +31,7 @@ impl<'tcx> Lift for Operand<'tcx> {
         AbstractOperand
     }
 }
-impl Lift for Local {
+impl<'tcx> Lift for Local<'tcx> {
     type Abstract = AbstractOperand;
     fn lift(&self) -> Self::Abstract {
         AbstractOperand
@@ -47,17 +48,17 @@ impl<'tcx> Lift for PlaceElem<'tcx> {
     fn lift(&self) -> Self::Abstract {
         match *self {
             ProjectionElem::Deref => ProjectionElem::Deref,
-            ProjectionElem::Field(f, ty) => ProjectionElem::Field(f, ty.lift()),
+            ProjectionElem::Field(f/*, ty*/) => ProjectionElem::Field(f/*, ty.lift()*/),
             ProjectionElem::OpaqueCast(ty) => ProjectionElem::OpaqueCast(ty.lift()),
             ProjectionElem::Index(ref i) => ProjectionElem::Index(i.lift()),
-            ProjectionElem::Subslice { from, to, from_end } => {
-                ProjectionElem::Subslice { from, to, from_end }
+            ProjectionElem::Subslice { from, to/*, from_end*/ } => {
+                ProjectionElem::Subslice { from, to/*, from_end*/ }
             }
-            ProjectionElem::ConstantIndex { offset, min_length, from_end } => {
-                ProjectionElem::ConstantIndex { offset, min_length, from_end }
+            ProjectionElem::ConstantIndex { offset/*, min_length*/, from_end } => {
+                ProjectionElem::ConstantIndex { offset/*, min_length*/, from_end }
             }
-            ProjectionElem::Downcast(a, u) => ProjectionElem::Downcast(a, u),
-            ProjectionElem::Subtype(ty) => ProjectionElem::Subtype(ty.lift()),
+            // ProjectionElem::Downcast(a, u) => ProjectionElem::Downcast(a, u),
+            // ProjectionElem::Subtype(ty) => ProjectionElem::Subtype(ty.lift()),
         }
     }
 }
