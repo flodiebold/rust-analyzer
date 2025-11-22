@@ -351,6 +351,18 @@ impl<'db> Place<'db> {
     fn project(&self, projection: PlaceElem<'db>, store: &mut ProjectionStore<'db>) -> Place<'db> {
         Place { local: self.local, projection: self.projection.project(projection, store) }
     }
+
+    fn as_ref(&self, store: &ProjectionStore<'db>) -> PlaceRef<'db> {
+        PlaceRef { local: self.local, projection: self.projection.lookup(store) }
+    }
+
+    fn as_local(&self, store: &ProjectionStore<'db>) -> Option<LocalId<'db>> {
+        if self.projection.lookup(store).is_empty() {
+            Some(self.local)
+        } else {
+            None
+        }
+    }
 }
 
 impl<'db> From<LocalId<'db>> for Place<'db> {
@@ -1253,6 +1265,29 @@ impl<'tcx> PlaceRef<'tcx> {
         match *self {
             PlaceRef { local, projection: [] } => Some(local),
             _ => None,
+        }
+    }
+}
+
+
+
+
+/// `Location` represents the position of the start of the statement; or, if
+/// `statement_index` equals the number of statements, then the start of the
+/// terminator.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Debug)]
+pub struct Location<'db> {
+    /// The block that the location is within.
+    pub block: BasicBlockId<'db>,
+
+    pub statement_index: usize,
+}
+
+impl<'db> Location<'db> {
+    pub fn start(body: &MirBody<'db>) -> Location<'db> {
+        Location {
+            block: body.start_block,
+            statement_index: 0,
         }
     }
 }
