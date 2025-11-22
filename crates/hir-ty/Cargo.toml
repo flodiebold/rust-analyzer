@@ -38,6 +38,7 @@ ra-ap-rustc_pattern_analysis.workspace = true
 ra-ap-rustc_ast_ir.workspace = true
 ra-ap-rustc_type_ir.workspace = true
 ra-ap-rustc_next_trait_solver.workspace = true
+# ra-ap-rustc_data_structures.workspace = true
 
 # These moved to dev deps if `setup_tracing` was a macro and dependents also
 # included these

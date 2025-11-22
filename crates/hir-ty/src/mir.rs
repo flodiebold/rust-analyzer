@@ -34,6 +34,7 @@ mod eval;
 mod lower;
 mod monomorphization;
 mod pretty;
+mod dataflow;
 
 pub use borrowck::{BorrowckResult, MutabilityReason, borrowck_query};
 pub use eval::{
@@ -56,7 +57,7 @@ fn return_slot<'db>() -> LocalId<'db> {
     LocalId::from_raw(RawIdx::from(0))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Local<'db> {
     pub ty: Ty<'db>,
 }
@@ -144,7 +145,7 @@ impl<'db> Operand<'db> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectionElem<V, T> {
     Deref,
     Field(Either<FieldId, TupleFieldId>),
@@ -1234,5 +1235,24 @@ impl_from!(ExprId, PatId for MirSpan);
 impl From<&ExprId> for MirSpan {
     fn from(value: &ExprId) -> Self {
         (*value).into()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct PlaceRef<'tcx> {
+    pub local: LocalId<'tcx>,
+    pub projection: &'tcx [PlaceElem<'tcx>],
+}
+
+
+impl<'tcx> PlaceRef<'tcx> {
+    /// If this place represents a local variable like `_X` with no
+    /// projections, return `Some(_X)`.
+    #[inline]
+    pub fn as_local(&self) -> Option<LocalId<'tcx>> {
+        match *self {
+            PlaceRef { local, projection: [] } => Some(local),
+            _ => None,
+        }
     }
 }
