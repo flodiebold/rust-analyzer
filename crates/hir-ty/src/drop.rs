@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-fn has_destructor(db: &dyn HirDatabase, adt: AdtId) -> bool {
+pub fn has_destructor(db: &dyn HirDatabase, adt: AdtId) -> bool {
     let module = match adt {
         AdtId::EnumId(id) => db.lookup_intern_enum(id).container,
         AdtId::StructId(id) => db.lookup_intern_struct(id).container,

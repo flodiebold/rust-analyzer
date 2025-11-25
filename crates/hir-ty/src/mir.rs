@@ -5,16 +5,16 @@ use std::{collections::hash_map::Entry, fmt::Display, iter};
 use base_db::Crate;
 use either::Either;
 use hir_def::{
-    DefWithBodyId, FieldId, StaticId, TupleFieldId, UnionId, VariantId,
-    expr_store::Body,
-    hir::{BindingAnnotation, BindingId, Expr, ExprId, Ordering, PatId},
+    DefWithBodyId, FieldId, LocalFieldId, StaticId, TupleFieldId, UnionId, VariantId, expr_store::Body, hir::{BindingAnnotation, BindingId, Expr, ExprId, Ordering, PatId}
 };
 use la_arena::{Arena, ArenaMap, Idx, RawIdx};
+use macros::{TypeFoldable, TypeVisitable};
 use rustc_ast_ir::Mutability;
 use rustc_hash::FxHashMap;
-use rustc_type_ir::inherent::{GenericArgs as _, IntoKind, SliceLike, Ty as _};
+use rustc_type_ir::{inherent::{GenericArgs as _, IntoKind as _, SliceLike as _, Ty as _}};
 use smallvec::{SmallVec, smallvec};
 use stdx::{impl_from, never};
+use tracing::debug;
 
 use crate::{
     CallableDefId, InferenceResult, MemoryMap,
@@ -23,9 +23,7 @@ use crate::{
     display::{DisplayTarget, HirDisplay},
     infer::PointerCast,
     next_solver::{
-        Const, DbInterner, ErrorGuaranteed, GenericArgs, ParamEnv, Ty, TyKind,
-        infer::{InferCtxt, traits::ObligationCause},
-        obligation_ctxt::ObligationCtxt,
+        Const, DbInterner, ErrorGuaranteed, GenericArgs, ParamEnv, Ty, TyKind, VariantIdx, infer::{InferCtxt, traits::ObligationCause}, obligation_ctxt::ObligationCtxt
     },
 };
 
@@ -60,6 +58,18 @@ fn return_slot<'db>() -> LocalId<'db> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Local<'db> {
     pub ty: Ty<'db>,
+}
+
+impl<'db> Local<'db> {
+    /// Returns `true` if this is a DerefTemp
+    pub fn is_deref_temp(&self) -> bool {
+        // TODO
+        false
+        // match self.local_info() {
+        //     LocalInfo::DerefTemp => true,
+        //     _ => false,
+        // }
+    }
 }
 
 /// An operand in MIR represents a "value" in Rust, the definition of which is undecided and part of
@@ -157,6 +167,8 @@ pub enum ProjectionElem<V, T> {
     //Downcast(Option<Symbol>, VariantIdx),
     OpaqueCast(T),
 }
+
+pub type ProjectionKind = ProjectionElem<(), ()>;
 
 impl<V, T> ProjectionElem<V, T> {
     pub fn projected_ty<'db>(
@@ -257,6 +269,32 @@ impl<V, T> ProjectionElem<V, T> {
             }
         }
     }
+
+    /// Returns the `ProjectionKind` associated to this projection.
+    pub fn kind(self) -> ProjectionKind {
+        self.try_map(|_| Some(()), |_| ()).unwrap()
+    }
+
+    /// Apply functions to types and values in this projection and return the result.
+    pub fn try_map<V2, T2>(
+        self,
+        v: impl FnOnce(V) -> Option<V2>,
+        t: impl FnOnce(T) -> T2,
+    ) -> Option<ProjectionElem<V2, T2>> {
+        Some(match self {
+            ProjectionElem::Deref => ProjectionElem::Deref,
+            ProjectionElem::Field(f) => ProjectionElem::Field(f),
+            ProjectionElem::ClosureField(i) => ProjectionElem::ClosureField(i),
+            ProjectionElem::ConstantIndex { offset, from_end } => {
+                ProjectionElem::ConstantIndex { offset, from_end }
+            }
+            ProjectionElem::Subslice { from, to } => {
+                ProjectionElem::Subslice { from, to }
+            }
+            ProjectionElem::OpaqueCast(ty) => ProjectionElem::OpaqueCast(t(ty)),
+            ProjectionElem::Index(val) => ProjectionElem::Index(v(val)?),
+        })
+    }
 }
 
 type PlaceElem<'db> = ProjectionElem<LocalId<'db>, Ty<'db>>;
@@ -352,7 +390,7 @@ impl<'db> Place<'db> {
         Place { local: self.local, projection: self.projection.project(projection, store) }
     }
 
-    fn as_ref(&self, store: &ProjectionStore<'db>) -> PlaceRef<'db> {
+    fn as_ref(&self, store: &'db ProjectionStore<'db>) -> PlaceRef<'db> {
         PlaceRef { local: self.local, projection: self.projection.lookup(store) }
     }
 
@@ -362,6 +400,21 @@ impl<'db> Place<'db> {
         } else {
             None
         }
+    }
+
+    pub fn ty_from(
+        local: LocalId,
+        projection: &[PlaceElem<'db>],
+        body: &MirBody<'db>,
+        tcx: DbInterner<'db>,
+    ) -> PlaceTy<'db>
+    {
+        PlaceTy::from_ty(body.locals[local].ty).multi_projection_ty(tcx, projection)
+    }
+
+    pub fn ty(&self, body: &MirBody<'db>, tcx: DbInterner<'db>) -> PlaceTy<'db>
+    {
+        Place::ty_from(self.local, self.projection.lookup(&body.projection_store), body, tcx)
     }
 }
 
@@ -1036,6 +1089,24 @@ pub enum Rvalue<'db> {
     CopyForDeref(Place<'db>),
 }
 
+pub enum RvalueInitializationState {
+    Shallow,
+    Deep,
+}
+
+impl<'db> Rvalue<'db> {
+    #[inline]
+    /// Returns `true` if this rvalue is deeply initialized (most rvalues) or
+    /// whether its only shallowly initialized (`Rvalue::Box`).
+    pub fn initialization_state(&self) -> RvalueInitializationState {
+        match *self {
+            Rvalue::ShallowInitBox(_, _) => RvalueInitializationState::Shallow,
+            Rvalue::ShallowInitBoxWithAlloc(_) => RvalueInitializationState::Shallow,
+            _ => RvalueInitializationState::Deep,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum StatementKind<'db> {
     Assign(Place<'db>, Rvalue<'db>),
@@ -1084,6 +1155,18 @@ pub struct BasicBlock<'db> {
     /// generated (particularly for MSVC cleanup). Unwind blocks must
     /// only branch to other unwind blocks.
     pub is_cleanup: bool,
+}
+
+impl<'db> BasicBlock<'db> {
+    #[inline]
+    pub fn terminator(&self) -> &Terminator<'db> {
+        self.terminator.as_ref().expect("invalid terminator state")
+    }
+
+    #[inline]
+    pub fn terminator_mut(&mut self) -> &mut Terminator<'db> {
+        self.terminator.as_mut().expect("invalid terminator state")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1267,6 +1350,19 @@ impl<'tcx> PlaceRef<'tcx> {
             _ => None,
         }
     }
+
+    #[inline]
+    pub fn last_projection(&self) -> Option<(PlaceRef<'tcx>, PlaceElem<'tcx>)> {
+        if let &[ref proj_base @ .., elem] = self.projection {
+            Some((PlaceRef { local: self.local, projection: proj_base }, elem))
+        } else {
+            None
+        }
+    }
+
+    pub fn ty(&self, body: &MirBody<'tcx>, tcx: DbInterner<'tcx>) -> PlaceTy<'tcx> {
+        Place::ty_from(self.local, self.projection, body, tcx)
+    }
 }
 
 
@@ -1289,5 +1385,173 @@ impl<'db> Location<'db> {
             block: body.start_block,
             statement_index: 0,
         }
+    }
+}
+
+
+#[derive(/*Copy, */Clone, Debug, TypeFoldable, TypeVisitable)]
+pub struct PlaceTy<'db> {
+    pub ty: Ty<'db>,
+    /// Downcast to a particular variant of an enum or a coroutine, if included.
+    #[type_foldable(identity)]
+    #[type_visitable(ignore)]
+    pub variant_index: Option<VariantIdx>,
+}
+
+impl<'tcx> PlaceTy<'tcx> {
+    #[inline]
+    pub fn from_ty(ty: Ty<'tcx>) -> PlaceTy<'tcx> {
+        PlaceTy { ty, variant_index: None }
+    }
+
+    // /// `place_ty.field_ty(tcx, f)` computes the type of a given field.
+    // ///
+    // /// Most clients of `PlaceTy` can instead just extract the relevant type
+    // /// directly from their `PlaceElem`, but some instances of `ProjectionElem<V, T>`
+    // /// do not carry a `Ty` for `T`.
+    // ///
+    // /// Note that the resulting type has not been normalized.
+    // pub fn field_ty(
+    //     tcx: DbInterner<'tcx>,
+    //     self_ty: Ty<'tcx>,
+    //     variant_idx: Option<VariantIdx>,
+    //     f: LocalFieldId,
+    // ) -> Ty<'tcx> {
+    //     if let Some(variant_index) = variant_idx {
+    //         match *self_ty.kind() {
+    //             TyKind::Adt(adt_def, args) if adt_def.is_enum() => {
+    //                 adt_def.variant(variant_index).fields[f].ty(tcx, args)
+    //             }
+    //             TyKind::Coroutine(def_id, args) => {
+    //                 todo!()
+    //                 // let mut variants = args.as_coroutine().state_tys(def_id, tcx);
+    //                 // let Some(mut variant) = variants.nth(variant_index.into()) else {
+    //                 //     panic!("variant {variant_index:?} of coroutine out of range: {self_ty:?}");
+    //                 // };
+
+    //                 // variant.nth(f.index()).unwrap_or_else(|| {
+    //                 //     panic!("field {f:?} out of range of variant: {self_ty:?} {variant_idx:?}")
+    //                 // })
+    //             }
+    //             _ => panic!("can't downcast non-adt non-coroutine type: {self_ty:?}"),
+    //         }
+    //     } else {
+    //         match self_ty.kind() {
+    //             TyKind::Adt(adt_def, args) if !adt_def.is_enum() => {
+    //                 tcx.db().field_types(adt_def.non_enum_variant().id())[f].instantiate(tcx, args)
+    //             }
+    //             // TyKind::Closure(_, args) => args
+    //             //     .as_closure()
+    //             //     .upvar_tys()
+    //             //     .get(f.index())
+    //             //     .copied()
+    //             //     .unwrap_or_else(|| panic!("field {f:?} out of range: {self_ty:?}")),
+    //             // TyKind::CoroutineClosure(_, args) => args
+    //             //     .as_coroutine_closure()
+    //             //     .upvar_tys()
+    //             //     .get(f.index())
+    //             //     .copied()
+    //             //     .unwrap_or_else(|| panic!("field {f:?} out of range: {self_ty:?}")),
+    //             // Only prefix fields (upvars and current state) are
+    //             // accessible without a variant index.
+    //             // TyKind::Coroutine(_, args) => {
+    //             //     args.as_coroutine().prefix_tys().get(f.index()).copied().unwrap_or_else(|| {
+    //             //         panic!("field {f:?} out of range of prefixes for {self_ty}")
+    //             //     })
+    //             // }
+    //             TyKind::Tuple(tys) => tys
+    //                 .get(f)
+    //                 .copied()
+    //                 .unwrap_or_else(|| panic!("field {f:?} out of range: {self_ty:?}")),
+    //             _ => panic!("can't project out of {self_ty:?}"),
+    //         }
+    //     }
+    // }
+
+    pub fn multi_projection_ty(
+        self,
+        tcx: DbInterner<'tcx>,
+        elems: &[PlaceElem<'tcx>],
+    ) -> PlaceTy<'tcx> {
+        elems.iter().fold(self, |place_ty, &elem| place_ty.projection_ty(tcx, elem))
+    }
+
+    /// Convenience wrapper around `projection_ty_core` for `PlaceElem`.
+    pub fn projection_ty<V: ::std::fmt::Debug>(
+        self,
+        tcx: DbInterner<'tcx>,
+        elem: ProjectionElem<V, Ty<'tcx>>,
+    ) -> PlaceTy<'tcx> {
+        self.projection_ty_core(tcx, &elem, |ty| ty, |self_ty, _variant, field_id| {
+            match self_ty.kind() {
+                TyKind::Adt(adt_def, args) if !adt_def.is_enum() => {
+                    tcx.db().field_types(adt_def.non_enum_variant().id())[field_id.unwrap_left().local_id].instantiate(tcx, args)
+                }
+                TyKind::Tuple(tys) => tys
+                    .get(field_id.unwrap_right().index as usize)
+                    .unwrap_or_else(|| panic!("field {field_id:?} out of range: {self_ty:?}")),
+                _ => panic!("can't project out of {self_ty:?}"),
+            }
+        }, |ty| ty)
+    }
+
+    /// `place_ty.projection_ty_core(tcx, elem, |...| { ... })`
+    /// projects `place_ty` onto `elem`, returning the appropriate
+    /// `Ty` or downcast variant corresponding to that projection.
+    /// The `handle_field` callback must map a `LocalFieldId` to its `Ty`,
+    /// (which should be trivial when `T` = `Ty`).
+    pub fn projection_ty_core<V, T>(
+        self,
+        tcx: DbInterner<'tcx>,
+        elem: &ProjectionElem<V, T>,
+        mut structurally_normalize: impl FnMut(Ty<'tcx>) -> Ty<'tcx>,
+        mut handle_field: impl FnMut(Ty<'tcx>, Option<VariantIdx>, Either<FieldId, TupleFieldId>/*, T*/) -> Ty<'tcx>,
+        mut handle_opaque_cast_and_subtype: impl FnMut(T) -> Ty<'tcx>,
+    ) -> PlaceTy<'tcx>
+    where
+        V: ::std::fmt::Debug,
+        T: ::std::fmt::Debug + Copy,
+    {
+        if self.variant_index.is_some() && !matches!(elem, ProjectionElem::Field(..)) {
+            panic!("cannot use non field projection on downcasted place")
+        }
+        let answer = match *elem {
+            ProjectionElem::Deref => {
+                let ty = structurally_normalize(self.ty).builtin_deref(true).unwrap_or_else(|| {
+                    panic!("deref projection of non-dereferenceable ty {:?}", self)
+                });
+                PlaceTy::from_ty(ty)
+            }
+            ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => {
+                PlaceTy::from_ty(structurally_normalize(self.ty).builtin_index().unwrap())
+            }
+            ProjectionElem::Subslice { from, to/*, from_end*/ } => {
+                PlaceTy::from_ty(match structurally_normalize(self.ty).kind() {
+                    TyKind::Slice(..) => self.ty,
+                    TyKind::Array(inner, _) /*if !from_end*/ => Ty::new_array(tcx, inner, to - from),
+                    // TyKind::Array(inner, size) if from_end => {
+                    //     let size = size
+                    //         .try_to_target_usize(tcx)
+                    //         .expect("expected subslice projection on fixed-size array");
+                    //     let len = size - from - to;
+                    //     Ty::new_array(tcx, *inner, len)
+                    // }
+                    _ => panic!("cannot subslice non-array type: `{:?}`", self),
+                })
+            }
+            // ProjectionElem::Downcast(_name, index) => {
+            //     PlaceTy { ty: self.ty, variant_index: Some(index) }
+            // }
+            ProjectionElem::Field(f/*, fty*/) => PlaceTy::from_ty(handle_field(
+                structurally_normalize(self.ty),
+                self.variant_index.clone(),
+                f,
+                // fty,
+            )),
+            ProjectionElem::ClosureField(_idx) => todo!(),
+            ProjectionElem::OpaqueCast(ty) => PlaceTy::from_ty(handle_opaque_cast_and_subtype(ty)),
+        };
+        debug!("projection_ty self: {:?} elem: {:?} yields: {:?}", self, elem, answer);
+        answer
     }
 }

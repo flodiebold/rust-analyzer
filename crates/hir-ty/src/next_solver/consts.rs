@@ -9,13 +9,13 @@ use rustc_type_ir::{
     BoundVar, BoundVarIndexKind, ConstVid, DebruijnIndex, FlagComputation, Flags, InferConst,
     TypeFoldable, TypeSuperFoldable, TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
     WithCachedTypeInfo,
-    inherent::{IntoKind, ParamEnv as _, PlaceholderLike, SliceLike},
+    inherent::{IntoKind, ParamEnv as _, PlaceholderLike, SliceLike, Ty as _},
     relate::Relate,
 };
+use triomphe::Arc;
 
 use crate::{
-    MemoryMap,
-    next_solver::{ClauseKind, ParamEnv, interner::InternedWrapperNoDebug},
+    MemoryMap, TraitEnvironment, next_solver::{ClauseKind, ParamEnv, interner::InternedWrapperNoDebug}
 };
 
 use super::{BoundVarKind, DbInterner, ErrorGuaranteed, GenericArgs, Placeholder, Ty};
@@ -97,6 +97,33 @@ impl<'db> Const<'db> {
             | ConstKind::Error(_)
             | ConstKind::Expr(_) => false,
         }
+    }
+
+    /// Creates a constant with the given integer value and interns it.
+    #[inline]
+    pub fn from_bits(
+        interner: DbInterner<'db>,
+        bits: u128,
+        env: Arc<TraitEnvironment<'db>>,
+        ty: Ty<'db>,
+    ) -> Self {
+        let size = interner
+            .db()
+            .layout_of_ty(ty, env)
+            .unwrap_or_else(|e| panic!("could not compute layout for {ty:?}: {e:?}"))
+            .size;
+        Self::new_valtree(
+            interner,
+            ty,
+            Box::from(&bits.to_le_bytes()[0..size.bytes_usize()]),
+            MemoryMap::Empty,
+        )
+    }
+
+    #[inline]
+    /// Creates an interned usize constant.
+    pub fn from_target_usize(tcx: DbInterner<'db>, n: u64) -> Self {
+        Self::from_bits(tcx, n as u128, TraitEnvironment::empty(tcx.krate.expect("no crate context found")), Ty::new_usize(tcx))
     }
 }
 

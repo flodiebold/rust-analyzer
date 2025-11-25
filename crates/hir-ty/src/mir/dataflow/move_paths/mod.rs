@@ -3,7 +3,6 @@
 use std::fmt;
 use std::ops::{Index, IndexMut};
 
-use rustc_abi::{FieldIdx, VariantIdx};
 use rustc_hash::FxHashMap;
 use rustc_index::{IndexSlice, IndexVec};
 use crate::mir::dataflow::rustc_mir::*;
@@ -16,6 +15,7 @@ use super::un_derefer::UnDerefer;
 rustc_index::newtype_index! {
     #[orderable]
     #[debug_format = "mp{}"]
+    #[gate_rustc_only]
     pub struct MovePathIndex {}
 }
 
@@ -28,11 +28,13 @@ rustc_index::newtype_index! {
 rustc_index::newtype_index! {
     #[orderable]
     #[debug_format = "mo{}"]
+    #[gate_rustc_only]
     pub struct MoveOutIndex {}
 }
 
 rustc_index::newtype_index! {
     #[debug_format = "in{}"]
+    #[gate_rustc_only]
     pub struct InitIndex {}
 }
 
@@ -213,7 +215,7 @@ impl<'db, T> LocationMap<'db, T>
 where
     T: Default + Clone,
 {
-    fn new(body: &Body<'_>) -> Self {
+    fn new(body: &Body<'db>) -> Self {
         LocationMap {
             map: body
                 .basic_blocks
@@ -391,16 +393,17 @@ impl<'tcx> MoveData<'tcx> {
 }
 
 /// A projection into a move path producing a child path
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(/*Copy, */Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MoveSubPath {
     Deref,
-    Field(FieldIdx),
+    Field(Either<FieldId, TupleFieldId>),
+    ClosureField(usize),
     ConstantIndex(u64),
     Downcast(VariantIdx),
     UnwrapUnsafeBinder,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(/*Copy, */Clone, Debug, PartialEq, Eq)]
 pub enum MoveSubPathResult {
     One(MoveSubPath),
     Subslice { from: u64, to: u64 },
@@ -413,12 +416,13 @@ impl MoveSubPath {
         let subpath = match elem {
             // correspond to a MoveSubPath
             ProjectionKind::Deref => MoveSubPath::Deref,
-            ProjectionKind::Field(idx, _) => MoveSubPath::Field(idx),
-            ProjectionKind::ConstantIndex { offset, min_length: _, from_end: false } => {
+            ProjectionKind::Field(idx) => MoveSubPath::Field(idx),
+            ProjectionElem::ClosureField(idx) => MoveSubPath::ClosureField(idx),
+            ProjectionKind::ConstantIndex { offset, from_end: false } => {
                 MoveSubPath::ConstantIndex(offset)
             }
-            ProjectionKind::Downcast(_, idx) => MoveSubPath::Downcast(idx),
-            ProjectionKind::UnwrapUnsafeBinder(_) => MoveSubPath::UnwrapUnsafeBinder,
+            // ProjectionKind::Downcast(_, idx) => MoveSubPath::Downcast(idx),
+            // ProjectionKind::UnwrapUnsafeBinder(_) => MoveSubPath::UnwrapUnsafeBinder,
 
             // this should be the same move path as its parent
             // its fine to skip because it cannot have sibling move paths
@@ -429,14 +433,15 @@ impl MoveSubPath {
 
             // these cannot be moved through
             ProjectionKind::Index(_)
-            | ProjectionKind::ConstantIndex { offset: _, min_length: _, from_end: true }
-            | ProjectionKind::Subslice { from: _, to: _, from_end: true } => {
+            | ProjectionKind::ConstantIndex { offset: _, from_end: true }
+            // | ProjectionKind::Subslice { from: _, to: _, from_end: true }
+            => {
                 return MoveSubPathResult::Stop;
             }
 
             // subslice is special.
             // it needs to be split into individual move paths
-            ProjectionKind::Subslice { from, to, from_end: false } => {
+            ProjectionKind::Subslice { from, to/*, from_end: false*/ } => {
                 return MoveSubPathResult::Subslice { from, to };
             }
         };

@@ -386,19 +386,14 @@ pub enum VariantDef {
 impl VariantDef {
     pub fn id(&self) -> VariantId {
         match self {
-            VariantDef::Struct(struct_id) => VariantId::StructId(*struct_id),
-            VariantDef::Union(union_id) => VariantId::UnionId(*union_id),
-            VariantDef::Enum(enum_variant_id) => VariantId::EnumVariantId(*enum_variant_id),
+            VariantDef::Struct(id) => (*id).into(),
+            VariantDef::Union(id) => (*id).into(),
+            VariantDef::Enum(id) => (*id).into(),
         }
     }
 
     pub fn fields(&self, db: &dyn HirDatabase) -> Vec<(Idx<FieldData>, FieldData)> {
-        let id: VariantId = match self {
-            VariantDef::Struct(it) => (*it).into(),
-            VariantDef::Union(it) => (*it).into(),
-            VariantDef::Enum(it) => (*it).into(),
-        };
-        id.fields(db).fields().iter().map(|(id, data)| (id, data.clone())).collect()
+        self.id().fields(db).fields().iter().map(|(id, data)| (id, data.clone())).collect()
     }
 }
 
@@ -592,6 +587,12 @@ impl AdtDef {
 
     pub fn is_box(&self) -> bool {
         self.inner().flags.is_box
+    }
+
+    /// Returns `true` if this is a union.
+    #[inline]
+    pub fn is_union(self) -> bool {
+        self.inner().flags.is_union
     }
 
     #[inline]
