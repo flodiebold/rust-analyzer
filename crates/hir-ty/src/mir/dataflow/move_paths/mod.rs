@@ -213,7 +213,7 @@ impl<'db, T> LocationMap<'db, T>
 where
     T: Default + Clone,
 {
-    fn new(body: &Body<'_>) -> Self {
+    fn new(body: &Body<'db>) -> Self {
         LocationMap {
             map: body
                 .basic_blocks

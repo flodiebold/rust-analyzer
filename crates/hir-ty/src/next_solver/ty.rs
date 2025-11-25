@@ -144,6 +144,11 @@ impl<'db> Ty<'db> {
         Ty::new_alias(interner, AliasTyKind::Opaque, AliasTy::new_from_args(interner, def_id, args))
     }
 
+    #[inline]
+    pub fn new_array(interner: DbInterner<'db>, ty: Ty<'db>, n: u64) -> Ty<'db> {
+        Ty::new(interner, TyKind::Array(ty, Const::from_target_usize(interner, n)))
+    }
+
     /// Returns the `Size` for primitive types (bool, uint, int, char, float).
     pub fn primitive_size(self, interner: DbInterner<'db>) -> Size {
         match self.kind() {
