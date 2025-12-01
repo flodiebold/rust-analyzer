@@ -1,6 +1,7 @@
 //! [`MovePath`]s track the initialization state of places and their sub-paths.
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
 use rustc_hash::FxHashMap;
@@ -61,7 +62,8 @@ pub struct MovePath<'tcx> {
     pub next_sibling: Option<MovePathIndex>,
     pub first_child: Option<MovePathIndex>,
     pub parent: Option<MovePathIndex>,
-    pub place: Place<'tcx>,
+    pub use_lifetime: PhantomData<&'tcx ()>,
+    // pub place: Place<'tcx>,
 }
 
 impl<'tcx> MovePath<'tcx> {
@@ -141,13 +143,15 @@ impl<'tcx> fmt::Debug for MovePath<'tcx> {
         if let Some(next_sibling) = self.next_sibling {
             write!(w, " next_sibling: {next_sibling:?}")?;
         }
-        write!(w, " place: {:?} }}", self.place)
+        // write!(w, " place: {:?} }}", self.place)
+        Ok(())
     }
 }
 
 impl<'tcx> fmt::Display for MovePath<'tcx> {
     fn fmt(&self, w: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(w, "{:?}", self.place)
+        Ok(())
+        // write!(w, "{:?}", self.place)
     }
 }
 

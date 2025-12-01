@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::mem;
 
 use rustc_index::IndexVec;
@@ -48,7 +49,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                         &mut path_map,
                         &mut init_path_map,
                         None,
-                        Place::from(i),
+                        // Place::from(i),
                     )))
                 } else {
                     (i, None)
@@ -84,10 +85,10 @@ fn new_move_path<'tcx>(
     path_map: &mut IndexVec<MovePathIndex, SmallVec<[MoveOutIndex; 4]>>,
     init_path_map: &mut IndexVec<MovePathIndex, SmallVec<[InitIndex; 4]>>,
     parent: Option<MovePathIndex>,
-    place: Place<'tcx>,
+    // place: Place<'tcx>,
 ) -> MovePathIndex {
     let move_path =
-        move_paths.push(MovePath { next_sibling: None, first_child: None, parent, place });
+        move_paths.push(MovePath { next_sibling: None, first_child: None, parent, use_lifetime: PhantomData/*, place*/ });
 
     if let Some(parent) = parent {
         let next_sibling = mem::replace(&mut move_paths[parent].first_child, Some(move_path));
@@ -266,9 +267,9 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                             PlaceElem::ConstantIndex { offset, /*min_length: len, */from_end: false };
                         let subpath_elem = MoveSubPath::ConstantIndex(offset);
 
-                        let mpi = self.add_move_path(base, subpath_elem, |tcx| {
+                        let mpi = self.add_move_path(base, subpath_elem/*, |tcx| {
                             place_ref.project_deeper(&[place_elem], tcx)
-                        });
+                        }*/);
                         on_move(self, mpi);
                     }
 
@@ -291,7 +292,7 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                         &mut data.path_map,
                         &mut data.init_path_map,
                         Some(base),
-                        place_ref.project_deeper(&[elem], tcx),
+                        // place_ref.project_deeper(&[elem], tcx),
                     )
                 })
             }
@@ -311,15 +312,15 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
         &mut self,
         base: MovePathIndex,
         elem: MoveSubPath,
-        mk_place: impl FnOnce(DbInterner<'tcx>) -> Place<'tcx>,
+        // mk_place: impl FnOnce(DbInterner<'tcx>) -> Place<'tcx>,
     ) -> MovePathIndex {
         let MoveDataBuilder {
             data: MoveData { rev_lookup, move_paths, path_map, init_path_map, .. },
-            tcx,
+            // tcx,
             ..
         } = self;
         *rev_lookup.projections.entry((base, elem)).or_insert_with(move || {
-            new_move_path(move_paths, path_map, init_path_map, Some(base), mk_place(*tcx))
+            new_move_path(move_paths, path_map, init_path_map, Some(base)/*, mk_place(*tcx)*/)
         })
     }
 
@@ -404,7 +405,8 @@ impl<'a, 'tcx, F: Fn(Ty<'tcx>) -> bool> MoveDataBuilder<'a, 'tcx, F> {
                     // Box starts out uninitialized - need to create a separate
                     // move-path for the interior so it will be separate from
                     // the exterior.
-                    self.create_move_path(self.tcx.mk_place_deref(*place));
+                    // self.create_move_path(self.tcx.mk_place_deref(*place));
+                    self.create_move_path(todo!("deref"));
                     self.gather_init(place.as_ref(&self.body.projection_store), InitKind::Shallow);
                 } else {
                     self.gather_init(place.as_ref(&self.body.projection_store), InitKind::Deep);
