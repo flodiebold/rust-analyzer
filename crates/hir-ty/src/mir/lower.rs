@@ -35,11 +35,7 @@ use crate::{
     layout::LayoutError,
     method_resolution::CandidateId,
     mir::{
-        AggregateKind, Arena, BasicBlock, BasicBlockId, BinOp, BorrowKind, CastKind, Either, Expr,
-        FieldId, GenericArgs, Idx, InferenceResult, Local, LocalId, MemoryMap, MirBody, MirSpan,
-        Mutability, Operand, Place, PlaceElem, PointerCast, ProjectionElem, ProjectionStore,
-        RawIdx, Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind,
-        TupleFieldId, Ty, UnOp, VariantId, return_slot,
+        AggregateKind, Arena, BasicBlock, BasicBlockId, BinOp, BorrowKind, CastKind, Either, Expr, FieldId, GenericArgs, Idx, InferenceResult, Local, LocalId, MemoryMap, MirBody, MirSpan, Mutability, Operand, Place, PlaceElem, PointerCast, Projection, ProjectionElem, RawIdx, Rvalue, Statement, StatementKind, SwitchTargets, Terminator, TerminatorKind, TupleFieldId, Ty, UnOp, VariantId, return_slot
     },
     next_solver::{
         Const, DbInterner, ParamConst, Region, TyKind, TypingMode, UnevaluatedConst,
@@ -291,7 +287,6 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
         let locals = Arena::new();
         let binding_locals: ArenaMap<BindingId, LocalId<'db>> = ArenaMap::new();
         let mir = MirBody {
-            projection_store: ProjectionStore::default(),
             basic_blocks,
             locals,
             start_block,
@@ -922,7 +917,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                                         i as u32,
                                                     )),
                                                 })),
-                                                &mut self.result.projection_store,
+                                                self.db,
                                             );
                                             Operand { kind: OperandKind::Copy(p), span: None }
                                         }
@@ -947,7 +942,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                 parent: union_id.into(),
                                 local_id,
                             })),
-                            &mut self.result.projection_store,
+                            self.db,
                         );
                         self.lower_expr_to_place(*expr, place, current)
                     }
@@ -1011,7 +1006,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 else {
                     return Ok(None);
                 };
-                let p = place.project(ProjectionElem::Deref, &mut self.result.projection_store);
+                let p = place.project(ProjectionElem::Deref, self.db);
                 self.push_assignment(current, p, operand.into(), expr_id.into());
                 Ok(Some(current))
             }
@@ -1255,7 +1250,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                 for capture in captures.iter() {
                     let p = Place {
                         local: self.binding_local(capture.place.local)?,
-                        projection: self.result.projection_store.intern(
+                        projection: Projection::from_iter(self.db,
                             capture
                                 .place
                                 .projections
@@ -1278,8 +1273,7 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                                     }
                                     #[allow(unreachable_patterns)]
                                     ProjectionElem::Index(it) => match it {},
-                                })
-                                .collect(),
+                                }),
                         ),
                     };
                     match &capture.kind {
@@ -1403,13 +1397,13 @@ impl<'a, 'db> MirLowerCtx<'a, 'db> {
                         tuple: TupleId(!0), // dummy as its unused
                         index,
                     })),
-                    &mut self.result.projection_store,
+                    self.db,
                 )
             } else {
                 let field =
                     self.infer.field_resolution(expr_id).ok_or(MirLowerError::UnresolvedField)?;
                 *place =
-                    place.project(ProjectionElem::Field(field), &mut self.result.projection_store);
+                    place.project(ProjectionElem::Field(field), self.db);
             }
         } else {
             not_supported!("")
@@ -2170,13 +2164,13 @@ pub fn mir_body_for_closure_query<'db>(
             vec![ProjectionElem::Deref]
         }
     };
-    ctx.result.walk_places(|p, store| {
+    ctx.result.walk_places(|p| {
         if let Some(it) = upvar_map.get(&p.local) {
             let r = it.iter().find(|it| {
-                if p.projection.lookup(store).len() < it.0.place.projections.len() {
+                if p.projection.lookup(db).len() < it.0.place.projections.len() {
                     return false;
                 }
-                for (it, y) in p.projection.lookup(store).iter().zip(it.0.place.projections.iter())
+                for (it, y) in p.projection.lookup(db).iter().zip(it.0.place.projections.iter())
                 {
                     match (it, y) {
                         (ProjectionElem::Deref, ProjectionElem::Deref) => (),
@@ -2198,9 +2192,9 @@ pub fn mir_body_for_closure_query<'db>(
                         next_projs.push(ProjectionElem::Deref);
                     }
                     next_projs.extend(
-                        prev_projs.lookup(store).iter().skip(it.0.place.projections.len()).cloned(),
+                        prev_projs.lookup(db).iter().skip(it.0.place.projections.len()).cloned(),
                     );
-                    p.projection = store.intern(next_projs.into());
+                    p.projection = Projection::from_iter(db, next_projs.into_iter());
                 }
                 None => err = Some(*p),
             }

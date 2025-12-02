@@ -6,13 +6,12 @@ use rustc_type_ir::inherent::{IntoKind, SliceLike, Ty as _};
 use crate::{
     BindingMode,
     mir::{
-        LocalId, MutBorrowKind, Operand, OperandKind,
-        lower::{
+        LocalId, MutBorrowKind, Operand, OperandKind, Projection, lower::{
             BasicBlockId, BinOp, BindingId, BorrowKind, Either, Expr, FieldId, Idx, MemoryMap,
             MirLowerCtx, MirLowerError, MirSpan, Pat, PatId, Place, PlaceElem, ProjectionElem,
             RecordFieldPat, ResolveValueResult, Result, Rvalue, SwitchTargets, TerminatorKind,
             TupleFieldId, TupleId, Ty, TyKind, ValueNs, VariantId,
-        },
+        }
     },
 };
 use crate::{method_resolution::CandidateId, next_solver::GenericArgs};
@@ -121,16 +120,13 @@ impl<'db> MirLowerCtx<'_, 'db> {
         mode: MatchingMode,
     ) -> Result<'db, (BasicBlockId<'db>, Option<BasicBlockId<'db>>)> {
         let cnt = self.infer.pat_adjustments.get(&pattern).map(|x| x.len()).unwrap_or_default();
-        cond_place.projection = self.result.projection_store.intern(
-            cond_place
+        cond_place.projection = Projection::new(self.db, cond_place
                 .projection
-                .lookup(&self.result.projection_store)
+                .lookup(self.db)
                 .iter()
                 .cloned()
                 .chain((0..cnt).map(|_| ProjectionElem::Deref))
-                .collect::<Vec<_>>()
-                .into(),
-        );
+            .collect::<Box<[PlaceElem]>>());
         Ok(match &self.body[pattern] {
             Pat::Missing => return Err(MirLowerError::IncompletePattern),
             Pat::Wild => (current, current_else),
@@ -314,7 +310,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                 for (i, &pat) in prefix.iter().enumerate() {
                     let next_place = cond_place.project(
                         ProjectionElem::ConstantIndex { offset: i as u64, from_end: false },
-                        &mut self.result.projection_store,
+                        self.db,
                     );
                     (current, current_else) =
                         self.pattern_match_inner(current, current_else, next_place, pat, mode)?;
@@ -328,7 +324,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                             from: prefix.len() as u64,
                             to: suffix.len() as u64,
                         },
-                        &mut self.result.projection_store,
+                        self.db,
                     );
                     let mode = self.infer.binding_modes[slice];
                     (current, current_else) = self.pattern_match_binding(
@@ -343,7 +339,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                 for (i, &pat) in suffix.iter().enumerate() {
                     let next_place = cond_place.project(
                         ProjectionElem::ConstantIndex { offset: i as u64, from_end: true },
-                        &mut self.result.projection_store,
+                        self.db,
                     );
                     (current, current_else) =
                         self.pattern_match_inner(current, current_else, next_place, pat, mode)?;
@@ -477,7 +473,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
             }
             Pat::Ref { pat, mutability: _ } => {
                 let cond_place =
-                    cond_place.project(ProjectionElem::Deref, &mut self.result.projection_store);
+                    cond_place.project(ProjectionElem::Deref, self.db);
                 self.pattern_match_inner(current, current_else, cond_place, *pat, mode)?
             }
             &Pat::Expr(expr) => {
@@ -685,7 +681,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
         mode: MatchingMode,
     ) -> Result<'db, (BasicBlockId<'db>, Option<BasicBlockId<'db>>)> {
         for (proj, arg) in args {
-            let cond_place = cond_place.project(proj, &mut self.result.projection_store);
+            let cond_place = cond_place.project(proj, self.db);
             (current, current_else) =
                 self.pattern_match_inner(current, current_else, cond_place, arg, mode)?;
         }

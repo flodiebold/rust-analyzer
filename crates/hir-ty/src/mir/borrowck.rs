@@ -140,7 +140,7 @@ fn moved_out_of_ref<'db>(
         OperandKind::Copy(p) | OperandKind::Move(p) => {
             let mut ty: Ty<'db> = body.locals[p.local].ty;
             let mut is_dereference_of_ref = false;
-            for proj in p.projection.lookup(&body.projection_store) {
+            for proj in p.projection.lookup(db) {
                 if *proj == ProjectionElem::Deref && ty.as_reference().is_some() {
                     is_dereference_of_ref = true;
                 }
@@ -239,7 +239,7 @@ fn partially_moved<'db>(
     let mut for_operand = |op: &Operand<'db>, span: MirSpan| match op.kind {
         OperandKind::Copy(p) | OperandKind::Move(p) => {
             let mut ty: Ty<'db> = body.locals[p.local].ty;
-            for proj in p.projection.lookup(&body.projection_store) {
+            for proj in p.projection.lookup(db) {
                 ty = proj.projected_ty(
                     infcx,
                     ty,
@@ -380,7 +380,7 @@ fn place_case<'db>(
     let db = infcx.interner.db;
     let mut is_part_of = false;
     let mut ty = body.locals[lvalue.local].ty;
-    for proj in lvalue.projection.lookup(&body.projection_store).iter() {
+    for proj in lvalue.projection.lookup(db).iter() {
         match proj {
             ProjectionElem::Deref if ty.as_adt().is_none() => return ProjectionCase::Indirect, // It's indirect in case of reference and raw
             ProjectionElem::Deref // It's direct in case of `Box<T>`
@@ -425,7 +425,7 @@ fn ever_initialized_map<'db>(
             for statement in &block.statements {
                 match &statement.kind {
                     StatementKind::Assign(p, _) => {
-                        if p.projection.lookup(&body.projection_store).is_empty() && p.local == l {
+                        if p.projection.lookup(db).is_empty() && p.local == l {
                             is_ever_initialized = true;
                         }
                     }
@@ -463,7 +463,7 @@ fn ever_initialized_map<'db>(
                 | TerminatorKind::Return
                 | TerminatorKind::Unreachable => (),
                 TerminatorKind::Call { target, cleanup, destination, .. } => {
-                    if destination.projection.lookup(&body.projection_store).is_empty()
+                    if destination.projection.lookup(db).is_empty()
                         && destination.local == l
                     {
                         is_ever_initialized = true;
@@ -635,7 +635,7 @@ fn mutability_of_locals<'db>(
                 for arg in args.iter() {
                     record_usage_for_operand(arg, &mut result);
                 }
-                if destination.projection.lookup(&body.projection_store).is_empty() {
+                if destination.projection.lookup(db).is_empty() {
                     if ever_init_map.get(destination.local).copied().unwrap_or_default() {
                         push_mut_span(destination.local, terminator.span, &mut result);
                     } else {

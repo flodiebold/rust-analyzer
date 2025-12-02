@@ -76,7 +76,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                     else {
                         return Ok(None);
                     };
-                    it.0 = it.0.project(ProjectionElem::Deref, &mut self.result.projection_store);
+                    it.0 = it.0.project(ProjectionElem::Deref, self.db);
                     Ok(Some(it))
                 }
                 Adjust::Deref(Some(od)) => {
@@ -167,7 +167,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                             expr_id.into(),
                         );
                         Ok(Some((
-                            temp.project(ProjectionElem::Deref, &mut self.result.projection_store),
+                            temp.project(ProjectionElem::Deref, self.db),
                             current,
                         )))
                     }
@@ -206,7 +206,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                 let Some((mut r, current)) = self.lower_expr_as_place(current, *expr, true)? else {
                     return Ok(None);
                 };
-                r = r.project(ProjectionElem::Deref, &mut self.result.projection_store);
+                r = r.project(ProjectionElem::Deref, self.db);
                 Ok(Some((r, current)))
             }
             Expr::UnaryOp { .. } => try_rvalue(self),
@@ -270,7 +270,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
                     return Ok(None);
                 };
                 p_base = p_base
-                    .project(ProjectionElem::Index(l_index), &mut self.result.projection_store);
+                    .project(ProjectionElem::Index(l_index), self.db);
                 Ok(Some((p_base, current)))
             }
             _ => try_rvalue(self),
@@ -310,7 +310,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
         else {
             return Ok(None);
         };
-        result = result.project(ProjectionElem::Deref, &mut self.result.projection_store);
+        result = result.project(ProjectionElem::Deref, self.db);
         Ok(Some((result, current)))
     }
 
@@ -366,7 +366,7 @@ impl<'db> MirLowerCtx<'_, 'db> {
         else {
             return Ok(None);
         };
-        result = result.project(ProjectionElem::Deref, &mut self.result.projection_store);
+        result = result.project(ProjectionElem::Deref, self.db);
         Ok(Some((result, current)))
     }
 }
